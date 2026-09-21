@@ -1,0 +1,18 @@
+{
+  "name": "blindcash",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BlindCash — Chaumian eCash with Schnorr blind signatures (course project)",
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green --kill-others-on-fail \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "start": "npm run dev",
+    "init:db": "npm --prefix backend run init:db",
+    "test": "npm --prefix backend run test",
+    "install:all": "npm --prefix backend install && npm --prefix frontend install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
