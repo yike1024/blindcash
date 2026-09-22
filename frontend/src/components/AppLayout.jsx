@@ -37,6 +37,10 @@ export default function AppLayout() {
     ...(user?.role === 'customer'
       ? [{ key: '/withdraw', label: <Link to="/withdraw">取款</Link> }]
       : []),
+    // M6 step 2: merchant-only 收款入口 (customer 不显示)
+    ...(user?.role === 'merchant'
+      ? [{ key: '/payment', label: <Link to="/payment">收款</Link> }]
+      : []),
   ];
 
   return (
