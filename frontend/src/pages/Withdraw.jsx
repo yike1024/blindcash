@@ -1,8 +1,10 @@
-// pages/Withdraw.jsx — M6 step 1: customer 4-move 取款向导
+// pages/Withdraw.jsx — customer 4-move 取款向导 (vault restyle)
 //
-// v3 §5 M6 step 1 + professor's 5 must-haves:
+// ALL CRYPTO LOGIC, REFS, BEFOREUNLOAD, TTL COUNTDOWN PRESERVED VERBATIM.
+// Only the presentation layer (JSX structure, classNames, inline theme) is
+// restyled to the Cryptographic Vault design system.
+//
 //   🔴 α/β only live in memory (useRef) — refresh/closes page → 取款作废.
-//      → 顶部 Alert 警示 + beforeunload 拦截 + "取消取款"按钮全程可见.
 //   🟢 取款金额 ≤ balance 前端先拦 (后端 400 兜底).
 //   🟢 TTL 倒计时 (init 时间 + SESSION_TTL_MS=5min) 显示给用户.
 //
@@ -13,18 +15,14 @@
 //   step 3: 展示 token { serial, amount, R_prime, s_prime } + 复制按钮
 //
 // ISOLATION §三-3: α_j / β_j for the signed candidate j NEVER leave the device.
-//   We store blinders in a useRef (NOT useState) so they don't appear in any
-//   React devtools state snapshot, never get serialized to sessionStorage, and
-//   are GC'd the moment the page unloads. The submitted `candidates` payload
-//   contains only { e, R_prime, serial } — the same shape the test suite uses.
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Card, Steps, Form, InputNumber, Button, Alert, Space, Typography,
-  Descriptions, Tag, message, Result, Spin, Statistic, Row, Col, Input,
+  Steps, Form, InputNumber, Button, Alert, Space, Typography,
+  Descriptions, message, Result, Spin, Input,
 } from 'antd';
-import { CopyOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
+import { CopyOutlined, LockOutlined } from '@ant-design/icons';
 
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
@@ -34,14 +32,13 @@ import { modN } from '@crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '@utils/hex.js';
 import { TOKEN_DOMAIN_TAG } from '@crypto/client/protocolConstants.js';
 
-const { Title, Text, Paragraph } = Typography;
+const { Text, Paragraph } = Typography;
 
 // ── helpers ────────────────────────────────────────────────────────────
-// bigint → 64-hex (zero-padded); used for e / alpha / beta / s' serialization.
 function scalarToHexFixed(s) {
   let h = s.toString(16);
   while (h.length < 64) h = '0' + h;
-  if (h.length > 64) h = h.slice(h.length - 64); // mod n already applied upstream
+  if (h.length > 64) h = h.slice(h.length - 64);
   return h;
 }
 function hexToScalarFixed(hex) {
@@ -52,9 +49,6 @@ function hexToScalarFixed(hex) {
   return v;
 }
 
-// Error code → human-readable Chinese message.
-// err.response.data.error is the bank's WithdrawalError code; fall back to
-// data.message if code is missing (e.g. express-validator VALIDATION_ERROR).
 function mapApiError(err, fallback = '操作失败') {
   const code = err?.response?.data?.error;
   const srvMsg = err?.response?.data?.message;
@@ -95,7 +89,6 @@ function mapApiError(err, fallback = '操作失败') {
   }
 }
 
-// Format ms countdown as mm:ss.
 function fmtCountdown(ms) {
   if (ms <= 0) return '00:00';
   const total = Math.floor(ms / 1000);
@@ -109,77 +102,61 @@ export default function WithdrawPage() {
   const { user, updateUser } = useAuth();
   const navigate = useNavigate();
 
-  // step: 0..3 (current antd Step)
   const [step, setStep] = useState(0);
-  // amount: form value (number)
   const [amount, setAmount] = useState(null);
 
-  // session state — all written only after init succeeds.
-  const [session, setSession] = useState(null); // { session_id, R[], N, amount, expires_at }
-  const [jIndex, setJIndex] = useState(null);     // picked j after submit
-  const [token, setToken] = useState(null);       // final unblinded token { serial, amount, R_prime, s_prime }
+  const [session, setSession] = useState(null);
+  const [jIndex, setJIndex] = useState(null);
+  const [token, setToken] = useState(null);
 
-  // UI flags
   const [loading, setLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState('');
   const [error, setError] = useState(null);
-  const [now, setNow] = useState(() => Date.now()); // for TTL countdown ticking
+  const [now, setNow] = useState(() => Date.now());
 
   // ── 🔴 CRITICAL: blinders live in a ref, NOT state ──
-  // They must NEVER reach sessionStorage / localStorage / any persist layer.
-  // useRef + immediate discard after unblind keeps them inside main-thread
-  // memory only; a page refresh wipes them (intentional — refresh = abort).
-  const blindersRef = useRef([]);   // [{ alpha: bigint, beta: bigint }, ...N]
-  const candidatesRef = useRef([]); // [{ e, R_prime, serial }, ...N] — submit payload
-  const sessionActiveRef = useRef(false); // for beforeunload guard
+  const blindersRef = useRef([]);
+  const candidatesRef = useRef([]);
+  const sessionActiveRef = useRef(false);
 
-  // ── beforeunload: warn if a session is in progress (step 1..3) ──
   useEffect(() => {
     const handler = (e) => {
       if (!sessionActiveRef.current) return;
-      // Standard cross-browser "are you sure?" trigger.
       e.preventDefault();
-      e.returnValue = ''; // Chrome requires this to pop the confirmation.
+      e.returnValue = '';
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, []);
 
-  // ── TTL countdown ticker (1 Hz) ──
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // TTL display
   const ttlMs = session ? Math.max(0, new Date(session.expires_at).getTime() - now) : 0;
   const ttlExpired = session && ttlMs <= 0;
+  const ttlWarn = ttlMs > 0 && ttlMs < 60_000;
 
   // ────────────────────────────────────────────────────────────────────
-  // ① init: POST /api/withdraw/init { amount }
+  // ① init
   // ────────────────────────────────────────────────────────────────────
   const handleInit = useCallback(async () => {
     setLoading(true);
     setLoadingLabel('正在发起取款会话…');
     setError(null);
     try {
-      // Front-side guard: amount must be a positive int ≤ balance.
       if (!Number.isInteger(amount) || amount <= 0) {
         throw Object.assign(new Error('amount'), { response: { data: { error: 'INVALID_AMOUNT' } } });
       }
       if (amount > (user?.balance ?? 0)) {
         throw Object.assign(new Error('balance'), { response: { data: { error: 'INSUFFICIENT_BALANCE' } } });
       }
-      // Fetch bank public key (unauthenticated).
       const pubRes = await api.get('/bank/pubkey');
       const publicKeyHex = pubRes.data.public_key;
       const publicKey = hexToBytes(publicKeyHex);
 
-      // Call init.
       const { data } = await api.post('/withdraw/init', { amount });
-      // data = { session_id, R: ["hex66"...], amount, N, ttl_ms }
-      // expires_at uses the server-returned ttl_ms (single source of truth —
-      // the backend may override SESSION_TTL_MS via BC_SESSION_TTL_MS).
       const expires_at = new Date(Date.now() + data.ttl_ms).toISOString();
       const newSession = {
         session_id: data.session_id,
@@ -192,13 +169,7 @@ export default function WithdrawPage() {
       };
       setSession(newSession);
       sessionActiveRef.current = true;
-
-      // Optimistic local balance sync (backend already debited).
-      // We DO NOT await a fresh user fetch — /auth/me doesn't exist, and the
-      // optimistic decrement is correct unless another tab mutated the same
-      // user (a non-goal of the demo).
       updateUser({ balance: (user?.balance ?? 0) - amount });
-
       message.success('会话已建立，进入下一步');
       setStep(1);
     } catch (e) {
@@ -211,7 +182,6 @@ export default function WithdrawPage() {
 
   // ────────────────────────────────────────────────────────────────────
   // ② clientBuildCandidates + submit
-  //    Pure-local computation first (N candidates), then one POST.
   // ────────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     if (!session) return;
@@ -219,12 +189,11 @@ export default function WithdrawPage() {
     setLoadingLabel(`正在本地构造 ${session.N} 个盲化候选…`);
     setError(null);
     try {
-      // Local: build N candidates. blinders stay in the ref only.
       const candidates = [];
       const blinders = [];
       for (let i = 0; i < session.N; i++) {
         const R = hexToBytes(session.R[i]);
-        const bl = generateBlinders(); // { alpha, beta }
+        const bl = generateBlinders();
         const RPrime = computeBlindedCommitment(R, bl.alpha, bl.beta, session.publicKey);
         const serial = new Uint8Array(32);
         globalThis.crypto.getRandomValues(serial);
@@ -245,7 +214,6 @@ export default function WithdrawPage() {
         session_id: session.session_id,
         candidates,
       });
-      // data = { j }
       setJIndex(data.j);
       message.success(`银行选中候选 j=${data.j}，进入下一步`);
       setStep(2);
@@ -279,10 +247,9 @@ export default function WithdrawPage() {
         session_id: session.session_id,
         revealed,
       });
-      // data = { s_j: "hex64" }
       const sJ = hexToScalarFixed(data.s_j);
       const alphaJ = blindersRef.current[jIndex].alpha;
-      const sPrime = unblindResponse(sJ, alphaJ); // bigint
+      const sPrime = unblindResponse(sJ, alphaJ);
 
       const candJ = candidatesRef.current[jIndex];
       const finalToken = {
@@ -293,7 +260,6 @@ export default function WithdrawPage() {
       };
       setToken(finalToken);
 
-      // α/β have served their purpose — drop them so they can't leak later.
       blindersRef.current = [];
       candidatesRef.current = [];
 
@@ -307,9 +273,6 @@ export default function WithdrawPage() {
     }
   }, [session, jIndex]);
 
-  // ────────────────────────────────────────────────────────────────────
-  // helpers
-  // ────────────────────────────────────────────────────────────────────
   const resetSession = useCallback(() => {
     setSession(null);
     setJIndex(null);
@@ -322,12 +285,8 @@ export default function WithdrawPage() {
     setError(null);
   }, []);
 
-  // ────────────────────────────────────────────────────────────────────
-  // ⑦ cancel: POST /api/withdraw/cancel → refund + reset to step 0
-  // ────────────────────────────────────────────────────────────────────
   const handleCancel = useCallback(async () => {
     if (!session) {
-      // No session in front-end state — nothing to cancel locally.
       setStep(0);
       return;
     }
@@ -338,7 +297,6 @@ export default function WithdrawPage() {
       const { data } = await api.post('/withdraw/cancel', {
         session_id: session.session_id,
       });
-      // data = { refunded, new_balance }
       updateUser({ balance: data.new_balance });
       message.success(`已取消取款，余额已退还 (+${data.refunded})`);
       resetSession();
@@ -363,80 +321,103 @@ export default function WithdrawPage() {
   // render
   // ────────────────────────────────────────────────────────────────────
   const stepItems = [
-    { title: '① 发起', description: '输入金额并初始化会话' },
-    { title: '② 提交', description: '本地构造 N 候选并提交' },
-    { title: '③ 揭示', description: '揭示 α/β (i≠j) 拿 s_j' },
-    { title: '④ 完成', description: 'unblind → token 展示' },
+    { title: '发起', description: '输入金额' },
+    { title: '提交', description: '构造 N 候选' },
+    { title: '揭示', description: '揭示 α/β' },
+    { title: '完成', description: '解盲 → token' },
   ];
 
   return (
-    <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Card>
-        <Title level={3} style={{ marginTop: 0 }}>取款向导</Title>
-        <Alert
-          message="盲化因子 α/β 仅存于本页内存"
-          description="刷新 / 关闭页面将丢失 α/β，本次取款会作废。如需中止，请点击下方「取消取款」按钮（会退还余额至账户）。"
-          type="warning"
-          showIcon
-          icon={<ExclamationCircleOutlined />}
-          action={
-            session && step < 3 ? (
-              <Button size="small" danger onClick={handleCancel} loading={loading}>
-                取消取款
-              </Button>
-            ) : null
-          }
-        />
-        <Steps
-          current={step}
-          size="small"
-          items={stepItems}
-          style={{ marginTop: 16 }}
-        />
-      </Card>
+    <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
+      {/* ── Page header ── */}
+      <header className="bc-rise-1" style={{ marginBottom: 28 }}>
+        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>顾客 · 取款向导</p>
+        <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
+          向银行申请盲签名 token
+        </h1>
+      </header>
 
-      {/* TTL countdown + active-session banner */}
+      {/* ── Safety banner ── */}
+      <Alert
+        className="bc-rise-2"
+        message={
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <LockOutlined style={{ color: 'var(--gold-400)' }} />
+            盲化因子 α/β 仅存于本页内存
+          </span>
+        }
+        description="刷新 / 关闭页面将丢失 α/β，本次取款会作废。如需中止，请点击下方「取消取款」按钮（会退还余额至账户）。"
+        type="warning"
+        showIcon={false}
+        action={
+          session && step < 3 ? (
+            <Button size="small" danger onClick={handleCancel} loading={loading}>
+              取消取款
+            </Button>
+          ) : null
+        }
+        style={{ marginBottom: 24 }}
+      />
+
+      {/* ── Steps ── */}
+      <div className="bc-card bc-rise-2" style={{ padding: '20px 24px', marginBottom: 24 }}>
+        <Steps current={step} size="small" items={stepItems} />
+      </div>
+
+      {/* ── TTL countdown + active-session banner ── */}
       {session && step < 3 && (
-        <Card size="small">
-          <Row gutter={16} align="middle">
-            <Col flex="auto">
-              <Statistic
-                title="会话剩余时间"
-                value={ttlExpired ? '已过期' : fmtCountdown(ttlMs)}
-                valueStyle={ttlExpired ? { color: '#cf1322' } : (ttlMs < 60_000 ? { color: '#fa8c16' } : undefined)}
-              />
-            </Col>
-            <Col>
-              <Descriptions size="small" column={1}>
-                <Descriptions.Item label="会话 ID">
-                  <Text code copyable style={{ fontSize: 12 }}>{session.session_id}</Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="N (候选数)">
-                  <Tag color="blue">{session.N}</Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="取款金额">
-                  <Text strong>{session.amount}</Text>
-                </Descriptions.Item>
-              </Descriptions>
-            </Col>
-          </Row>
+        <div className="bc-card bc-rise-3" style={{ padding: '20px 24px', marginBottom: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
+            <div>
+              <div className="bc-stat-label" style={{ marginBottom: 6 }}>会话剩余时间</div>
+              <div
+                className="bc-mono"
+                style={{
+                  fontSize: 30,
+                  fontWeight: 500,
+                  fontVariantNumeric: 'tabular-nums',
+                  color: ttlExpired ? 'var(--crimson-400)' : ttlWarn ? 'var(--gold-400)' : 'var(--paper-100)',
+                  letterSpacing: '0.02em',
+                }}
+              >
+                {ttlExpired ? '已过期' : fmtCountdown(ttlMs)}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
+              <Meta label="会话 ID">
+                <span className="bc-mono bc-scalar" style={{ fontSize: 11, maxWidth: 220 }}>
+                  {session.session_id}
+                </span>
+              </Meta>
+              <Meta label="候选数 N">
+                <span className="bc-chip bc-chip--gold">{session.N}</span>
+              </Meta>
+              <Meta label="取款金额">
+                <span className="bc-mono" style={{ fontSize: 20, color: 'var(--gold-400)' }}>{session.amount}</span>
+              </Meta>
+            </div>
+          </div>
           {ttlExpired && (
             <Alert
-              style={{ marginTop: 12 }}
+              style={{ marginTop: 16 }}
               type="error"
               showIcon
               message="会话已过期"
               description="服务器已自动退还余额。请点击「取消取款」清理本地状态，然后重新开始。"
             />
           )}
-        </Card>
+        </div>
       )}
 
-      {/* Step 0: 输入金额 */}
+      {/* ── Step 0: 输入金额 ── */}
       {step === 0 && (
-        <Card title="① 发起取款会话">
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>① 发起取款会话</h2>
+          <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 20 }}>
+            POST /api/withdraw/init
+          </p>
           {error && <Alert message={error} type="error" showIcon closable onClose={() => setError(null)} style={{ marginBottom: 16 }} />}
-          <Form layout="vertical" autoComplete="off">
+          <Form layout="vertical" autoComplete="off" requiredMark={false}>
             <Form.Item
               label="取款金额"
               extra={`当前余额：${user?.balance ?? 0}（顾客初始 100）`}
@@ -454,7 +435,7 @@ export default function WithdrawPage() {
               ]}
             >
               <InputNumber
-                style={{ width: 200 }}
+                style={{ width: 220 }}
                 min={1}
                 step={1}
                 precision={0}
@@ -464,90 +445,98 @@ export default function WithdrawPage() {
               />
             </Form.Item>
             <Form.Item>
-              <Button
-                type="primary"
-                onClick={handleInit}
-                loading={loading}
-                disabled={amount == null}
-              >
+              <Button type="primary" onClick={handleInit} loading={loading} disabled={amount == null}>
                 {loading ? loadingLabel : '发起取款'}
               </Button>
             </Form.Item>
           </Form>
-        </Card>
+        </section>
       )}
 
-      {/* Step 1: client build + submit */}
+      {/* ── Step 1: client build + submit ── */}
       {step === 1 && (
-        <Card title="② 本地构造候选并提交">
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>② 本地构造候选并提交</h2>
+          <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 20 }}>
+            client build · POST /api/withdraw/submit
+          </p>
           {error && <Alert message={error} type="error" showIcon closable onClose={() => setError(null)} style={{ marginBottom: 16 }} />}
-          <Paragraph>
-            客户端将本地生成 <Text code>{session.N}</Text> 个盲化候选 (α_i, β_i 仅存内存)，
-            计算每个 <Text code>R'_i = R_i + α_i·G + β_i·P</Text> 与盲化挑战 <Text code>e_i = (e'_i + β_i) mod n</Text>，
-            然后把 <Text code>{'{ e, R_prime, serial }'}</Text> 数组提交给银行。
+          <Paragraph style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8 }}>
+            客户端将本地生成 <span className="bc-mono" style={{ color: 'var(--gold-400)' }}>{session.N}</span> 个盲化候选 (α_i, β_i 仅存内存)，
+            计算每个 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>R'_i = R_i + α_i·G + β_i·P</span> 与盲化挑战 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>e_i = (e'_i + β_i) mod n</span>，
+            然后把 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>&#123; e, R_prime, serial &#125;</span> 数组提交给银行。
             <br />
-            <Text type="secondary">注意：α/β 永不出本机，提交 payload 仅含 { '{e, R_prime, serial}' }。</Text>
+            <span style={{ color: 'var(--text-muted)', fontSize: 12.5 }}>注意：α/β 永不出本机，提交 payload 仅含 &#123;e, R_prime, serial&#125;。</span>
           </Paragraph>
           <Spin spinning={loading} tip={loadingLabel}>
             <Button type="primary" onClick={handleSubmit} loading={loading} disabled={ttlExpired}>
               构造并提交候选
             </Button>
           </Spin>
-        </Card>
+        </section>
       )}
 
-      {/* Step 2: reveal + unblind */}
+      {/* ── Step 2: reveal + unblind ── */}
       {step === 2 && (
-        <Card title="③ 揭示 α/β (i≠j) 并解盲">
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>③ 揭示 α/β (i≠j) 并解盲</h2>
+          <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 20 }}>
+            POST /api/withdraw/reveal · unblind
+          </p>
           {error && <Alert message={error} type="error" showIcon closable onClose={() => setError(null)} style={{ marginBottom: 16 }} />}
-          <Paragraph>
-            银行选中候选 <Tag color="orange">j = {jIndex}</Tag>。
-            客户端将对其余 <Text code>N-1 = {session.N - 1}</Text> 个候选揭示 <Text code>(α_i, β_i)</Text>，
-            供银行做 cut-and-choose 校验。校验通过后银行返回 <Text code>s_j</Text>，
-            客户端本地计算 <Text code>s' = (s_j + α_j) mod n</Text> 完成解盲。
+          <Paragraph style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8 }}>
+            银行选中候选 <span className="bc-chip bc-chip--gold">j = {jIndex}</span>。
+            客户端将对其余 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>N-1 = {session.N - 1}</span> 个候选揭示 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>(α_i, β_i)</span>，
+            供银行做 cut-and-choose 校验。校验通过后银行返回 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>s_j</span>，
+            客户端本地计算 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>s' = (s_j + α_j) mod n</span> 完成解盲。
           </Paragraph>
           <Spin spinning={loading} tip={loadingLabel}>
             <Button type="primary" onClick={handleReveal} loading={loading} disabled={ttlExpired}>
               揭示并解盲
             </Button>
           </Spin>
-        </Card>
+        </section>
       )}
 
-      {/* Step 3: token 展示 */}
+      {/* ── Step 3: token 展示 ── */}
       {step === 3 && token && (
-        <Card title="④ 取款完成 — Token 已生成">
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>④ 取款完成 — Token 已生成</h2>
+          <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 20 }}>
+            unblinded signature · ready to spend
+          </p>
           <Alert
             type="success"
             showIcon
             message="盲签名 token 已生成"
-            description="请复制下方 token，到「商户支付页」粘贴以完成存款（M6 step 2 将实现）。"
+            description="请复制下方 token，交付商户以完成存款。任何持有银行公钥者均可验真，但无人能追溯其来源。"
+            style={{ marginBottom: 20 }}
           />
-          <Descriptions column={1} bordered size="small" style={{ marginTop: 16 }}>
+          <Descriptions column={1} bordered size="small">
             <Descriptions.Item label="serial (32B)"><Text code copyable style={{ fontSize: 12 }}>{token.serial}</Text></Descriptions.Item>
             <Descriptions.Item label="amount"><Text strong>{token.amount}</Text></Descriptions.Item>
             <Descriptions.Item label="R_prime (33B)"><Text code copyable style={{ fontSize: 12 }}>{token.R_prime}</Text></Descriptions.Item>
             <Descriptions.Item label="s_prime (32B)"><Text code copyable style={{ fontSize: 12 }}>{token.s_prime}</Text></Descriptions.Item>
           </Descriptions>
-          <Space style={{ marginTop: 16 }}>
+          <Space style={{ marginTop: 20 }}>
             <Button type="primary" icon={<CopyOutlined />} onClick={copyToken}>复制完整 Token JSON</Button>
             <Button onClick={() => navigate('/dashboard')}>返回仪表盘</Button>
           </Space>
-          <Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
+          <Paragraph type="secondary" style={{ marginTop: 14, fontSize: 12, color: 'var(--text-muted)' }}>
             该 token 任何人持有即可向商户存款（盲签名不可追踪）。请妥善保管。
           </Paragraph>
           <Input.TextArea
             value={JSON.stringify(token, null, 2)}
             autoSize={{ minRows: 6, maxRows: 10 }}
             readOnly
-            style={{ marginTop: 8, fontFamily: 'monospace', fontSize: 12 }}
+            style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 12 }}
           />
-        </Card>
+        </section>
       )}
 
-      {/* 全局 cancel/error 区域（step 1..3 都需要看到 cancel 按钮） */}
+      {/* ── Global cancel/error region ── */}
       {session && step >= 1 && step < 3 && (
-        <Card size="small">
+        <section className="bc-card" style={{ padding: '16px 24px', marginBottom: 24 }}>
           <Space>
             <Button danger onClick={handleCancel} loading={loading} disabled={ttlExpired}>
               取消取款（退还余额）
@@ -556,7 +545,7 @@ export default function WithdrawPage() {
               <Button onClick={handleCancel}>清理过期会话</Button>
             )}
           </Space>
-        </Card>
+        </section>
       )}
 
       {error && step >= 1 && (
@@ -571,6 +560,17 @@ export default function WithdrawPage() {
           }
         />
       )}
-    </Space>
+    </div>
+  );
+}
+
+function Meta({ label, children }) {
+  return (
+    <div>
+      <div className="bc-mono" style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 6 }}>
+        {label}
+      </div>
+      {children}
+    </div>
   );
 }

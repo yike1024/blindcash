@@ -1,22 +1,18 @@
-// components/AppLayout.jsx — M1: main layout with nav bar + role badge
+// components/AppLayout.jsx — vault header + content shell
 //
-// Renders an antd Layout with a header containing the brand, nav links, the
-// current user's role badge, and a logout button. Page content renders via
-// <Outlet /> from react-router.
-//
-// M1 keeps this minimal; later milestones add the notification center (M5)
-// and the per-role menu items (/withdraw for customer, /payment for merchant).
+// A thin horizontal header: brand seal + wordmark, hairline nav with
+// underline-on-active links, a role chip, the username, and a ghost logout
+// button. Page content renders via <Outlet /> inside a constrained column.
 
-import { Layout, Menu, Button, Space, Typography, Tag } from 'antd';
+import { Layout } from 'antd';
 import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const { Header, Content } = Layout;
-const { Text } = Typography;
 
 const ROLE_META = {
-  customer: { color: 'blue', label: '顾客' },
-  merchant: { color: 'green', label: '商户' },
+  customer: { label: '顾客', chip: 'bc-chip--gold' },
+  merchant: { label: '商户', chip: 'bc-chip--emerald' },
 };
 
 export default function AppLayout() {
@@ -29,42 +25,74 @@ export default function AppLayout() {
     navigate('/login');
   };
 
-  const roleMeta = ROLE_META[user?.role] || { color: 'default', label: user?.role };
+  const roleMeta = ROLE_META[user?.role] ?? { label: user?.role, chip: '' };
 
-  const menuItems = [
-    { key: '/dashboard', label: <Link to="/dashboard">仪表盘</Link> },
-    // M6: customer-only 取款入口 (merchant 不显示)
-    ...(user?.role === 'customer'
-      ? [{ key: '/withdraw', label: <Link to="/withdraw">取款</Link> }]
-      : []),
-    // M6 step 2: merchant-only 收款入口 (customer 不显示)
-    ...(user?.role === 'merchant'
-      ? [{ key: '/payment', label: <Link to="/payment">收款</Link> }]
-      : []),
+  const navItems = [
+    { to: '/dashboard', label: '仪表盘' },
+    ...(user?.role === 'customer' ? [{ to: '/withdraw', label: '取款' }] : []),
+    ...(user?.role === 'merchant' ? [{ to: '/payment', label: '收款' }] : []),
   ];
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Space size="large">
-          <Text strong style={{ color: '#fff', fontSize: 18 }}>
+    <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
+      <Header
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 20,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 24,
+          padding: '0 clamp(20px, 4vw, 48px)',
+          background: 'rgba(15, 18, 24, 0.82)',
+          backdropFilter: 'blur(14px)',
+          WebkitBackdropFilter: 'blur(14px)',
+          borderBottom: '1px solid var(--border)',
+        }}
+      >
+        {/* ── Brand ── */}
+        <Link to="/dashboard" style={{ display: 'inline-flex', alignItems: 'center', gap: 12, textDecoration: 'none' }}>
+          <span className="bc-seal" aria-hidden="true">B</span>
+          <span
+            className="bc-display"
+            style={{ fontSize: 19, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--paper-100)' }}
+          >
             BlindCash
-          </Text>
-          <Menu
-            theme="dark"
-            mode="horizontal"
-            selectedKeys={[location.pathname]}
-            items={menuItems}
-            style={{ minWidth: 120 }}
-          />
-        </Space>
-        <Space size="middle">
-          <Tag color={roleMeta.color}>{roleMeta.label}</Tag>
-          <Text style={{ color: '#bbb' }}>{user?.username}</Text>
-          <Button size="small" onClick={handleLogout}>退出</Button>
-        </Space>
+          </span>
+        </Link>
+
+        {/* ── Nav ── */}
+        <nav style={{ display: 'flex', alignItems: 'center', gap: 28 }} aria-label="主导航">
+          {navItems.map((item) => {
+            const active = location.pathname === item.to;
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                className={`bc-nav-link ${active ? 'bc-nav-link--active' : ''}`}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* ── Identity ── */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginLeft: 'auto' }}>
+          <span className={`bc-chip ${roleMeta.chip}`} aria-label={`当前角色：${roleMeta.label}`}>
+            {roleMeta.label}
+          </span>
+          <span className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            @{user?.username}
+          </span>
+          <button type="button" className="bc-ghost-btn" onClick={handleLogout}>
+            退出
+          </button>
+        </div>
       </Header>
-      <Content style={{ padding: '24px 48px' }}>
+
+      <Content style={{ padding: 0 }}>
         <Outlet />
       </Content>
     </Layout>

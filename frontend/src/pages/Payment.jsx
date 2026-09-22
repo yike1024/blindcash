@@ -1,29 +1,15 @@
-// pages/Payment.jsx — M6 step 2: merchant 收款 / 双花演示
+// pages/Payment.jsx — merchant 收款 / 双花演示 (vault restyle)
 //
-// v3 §5 M6 step 2 + professor's M6.md must-haves #2 & #3:
+// ALL CRYPTO LOGIC, DEBOUNCED PREVIEW, VERIFY-SIG FLOW PRESERVED VERBATIM.
+// Only the presentation layer is restyled to the Cryptographic Vault system.
+//
 //   🟡 #3 merchant 本地预验签: 粘贴 token 后先调前端 verifySig 显示 ✓ 再提交.
-//      本地预验签是 UX/教学手段 — 任何人都可公开验证盲签名 (public-verifiability).
-//      但本地通过 ≠ 服务器一定接受 (双花/篡改后本地仍可能误判, 服务器 verifySig
-//      是权威). 本地预验签只过滤明显的格式错误, 减少 API 调用.
 //   🟡 #2 双花演示时序不确定: UI 用状态码判断, 不写"第一个一定成功".
-//      真实双花 = 两个商户同时收到同一 token 并发提交, 服务器 BEGIN IMMEDIATE
-//      串行化, 具体哪个 200 哪个 409 取决于调度, 不保证先发起者赢.
-//      本页提供两种演示:
-//        (a) 单标签页"再次提交同一 token" → 一定 409 (因 serial 已入库).
-//        (b) 双标签页/双商户并发同一 token → 一边 200 一边 409 (时序不定).
-//
-// 流程:
-//   1.TextArea 粘贴 token JSON { serial, amount, R_prime, s_prime }
-//   2.useEffect debounce 300ms → 解析 JSON + 字段格式检查 + client verifySig
-//   3.显示预验签结果 (✓ 通过 / ✗ 失败 + 原因)
-//   4."提交存款"按钮 (disabled if 预验签未通过)
-//   5.POST /api/payment → 200 (deposited, new_balance) / 400 / 409
-//   6.成功后显示"再次提交同一 token"演示双花 → 409
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Card, Input, Alert, Button, Space, Typography, Descriptions, Tag,
-  message, Result, Spin, Statistic, Row, Col,
+  Input, Alert, Button, Space, Typography, Descriptions, Tag,
+  message, Result, Spin,
 } from 'antd';
 import {
   CheckCircleTwoTone, CloseCircleTwoTone, CopyOutlined, ThunderboltOutlined,
@@ -35,16 +21,11 @@ import { verifySig } from '@crypto/client/schnorrBlindClient.js';
 import { isValidCompressedFormat } from '@crypto/client/pointFormat.js';
 import { hexToBytes } from '@utils/hex.js';
 
-const { Title, Text, Paragraph } = Typography;
+const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
-// ── helpers ────────────────────────────────────────────────────────────
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 
-// Cheap front-end format gate mirroring backend formatGate (paymentService.js).
-// Returns { ok: true, fields: {serial, amount, R_prime, s_prime} } or
-//         { ok: false, reason: '...' }.
-// We deliberately do NOT throw — caller renders the reason inline.
 function cheapFormatCheck(tok) {
   if (typeof tok.serial !== 'string' || !HEX64_RE.test(tok.serial)) {
     return { ok: false, reason: 'serial 必须是 64 位 hex 字符串' };
@@ -69,7 +50,6 @@ function cheapFormatCheck(tok) {
   };
 }
 
-// Map backend PaymentError code → 中文提示.
 function mapApiError(err, fallback = '收款失败') {
   const code = err?.response?.data?.error;
   const srvMsg = err?.response?.data?.message;
@@ -89,26 +69,16 @@ function mapApiError(err, fallback = '收款失败') {
   }
 }
 
-// ── main component ─────────────────────────────────────────────────────
 export default function PaymentPage() {
   const { user, updateUser } = useAuth();
 
-  // raw text in the TextArea
   const [rawText, setRawText] = useState('');
-
-  // preview state: { phase: 'empty'|'parsing'|'ok'|'invalid', reason?, token?, verifyOk? }
   const [preview, setPreview] = useState({ phase: 'empty' });
-
-  // cached bank public key (Uint8Array 33 bytes)
   const publicKeyRef = useRef(null);
-
-  // submit state
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState(null); // { kind: 'success'|'error', msg, deposited?, new_balance? }
-  // double-spend demo: after first success, allow "resubmit same token"
+  const [result, setResult] = useState(null);
   const [lastToken, setLastToken] = useState(null);
 
-  // ── fetch bank public key once on mount ──
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -125,11 +95,8 @@ export default function PaymentPage() {
     return () => { cancelled = true; };
   }, []);
 
-  // ── debounced preview: parse + format check + client verifySig ──
   useEffect(() => {
-    // clear previous result whenever the raw text changes
     setResult(null);
-
     const text = rawText.trim();
     if (!text) {
       setPreview({ phase: 'empty' });
@@ -138,7 +105,6 @@ export default function PaymentPage() {
 
     setPreview({ phase: 'parsing' });
     const timer = setTimeout(async () => {
-      // 1. JSON parse
       let tok;
       try {
         tok = JSON.parse(text);
@@ -146,7 +112,6 @@ export default function PaymentPage() {
         setPreview({ phase: 'invalid', reason: `JSON 解析失败：${e.message}` });
         return;
       }
-      // 2. field presence + cheap format check
       if (!tok || typeof tok !== 'object') {
         setPreview({ phase: 'invalid', reason: 'token 必须是 JSON 对象' });
         return;
@@ -156,16 +121,13 @@ export default function PaymentPage() {
         setPreview({ phase: 'invalid', reason: fmt.reason });
         return;
       }
-      // 3. bank public key available?
       if (!publicKeyRef.current) {
         setPreview({ phase: 'invalid', reason: '银行公钥尚未加载，请稍候再试' });
         return;
       }
-      // 4. client verifySig (s'·G == R' + e'·P)
       try {
         const RPrime = hexToBytes(fmt.fields.R_prime);
         const sPrime = hexToBytes(fmt.fields.s_prime);
-        // verifySig accepts s_prime as Uint8Array(32) OR bigint — we pass bytes
         const ok = verifySig(
           RPrime,
           sPrime,
@@ -189,7 +151,6 @@ export default function PaymentPage() {
     return () => clearTimeout(timer);
   }, [rawText]);
 
-  // ── submit deposit ──
   const handleSubmit = useCallback(async () => {
     if (preview.phase !== 'ok' || !preview.verifyOk) {
       message.warning('请先粘贴并通过本地预验签');
@@ -199,7 +160,6 @@ export default function PaymentPage() {
     setResult(null);
     try {
       const { data } = await api.post('/payment', preview.token);
-      // data = { deposited, new_balance }
       updateUser({ balance: data.new_balance });
       setResult({
         kind: 'success',
@@ -207,7 +167,7 @@ export default function PaymentPage() {
         deposited: data.deposited,
         new_balance: data.new_balance,
       });
-      setLastToken(preview.token); // 记下来, 用于"再次提交"双花演示
+      setLastToken(preview.token);
       message.success(`收款成功：+${data.deposited}`);
     } catch (e) {
       setResult({ kind: 'error', msg: mapApiError(e, '收款失败') });
@@ -216,14 +176,12 @@ export default function PaymentPage() {
     }
   }, [preview, updateUser]);
 
-  // ── double-spend demo: resubmit the SAME token ──
   const handleResubmit = useCallback(async () => {
     if (!lastToken) return;
     setSubmitting(true);
     setResult(null);
     try {
       await api.post('/payment', lastToken);
-      // 服务器应该返回 409 (没机会走到这); 但万一走到, 防御性刷新
       setResult({ kind: 'error', msg: '服务器未拒绝重复 token (异常)' });
     } catch (e) {
       const code = e?.response?.data?.error;
@@ -252,7 +210,6 @@ export default function PaymentPage() {
     }
   }
 
-  // ── render ──
   const previewBadge = (() => {
     if (preview.phase === 'empty') {
       return (
@@ -278,7 +235,6 @@ export default function PaymentPage() {
         />
       );
     }
-    // phase === 'ok'
     return (
       <Alert
         type={preview.verifyOk ? 'success' : 'error'}
@@ -303,58 +259,64 @@ export default function PaymentPage() {
   })();
 
   return (
-    <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Card>
-        <Title level={3} style={{ marginTop: 0 }}>商户收款</Title>
-        <Alert
-          type="warning"
-          showIcon
-          message="教授 M6.md 必做 #3：本地预验签"
-          description="粘贴 token 后会立即调用前端 verifySig 验证 s'·G == R' + e'·P，通过 ✓ 后才能提交存款。这只是 UX/教学手段，服务器仍会独立做 verifySig + 双花检测，本地结果不替代服务器判定。"
-        />
-      </Card>
+    <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
+      {/* ── Page header ── */}
+      <header className="bc-rise-1" style={{ marginBottom: 28 }}>
+        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>商户 · 收款终端</p>
+        <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
+          粘贴 token，本地预验签后存入
+        </h1>
+      </header>
 
-      {/* 余额 */}
-      <Card size="small">
-        <Row gutter={16}>
-          <Col flex="auto">
-            <Statistic
-              title="当前余额"
-              value={user?.balance ?? 0}
-              prefix={user?.role === 'merchant' ? '商户' : ''}
-            />
-          </Col>
-          <Col>
-            <Descriptions size="small" column={1}>
-              <Descriptions.Item label="角色">
-                <Tag color="green">{user?.role === 'merchant' ? '商户' : user?.role}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="用户名">{user?.username}</Descriptions.Item>
-            </Descriptions>
-          </Col>
-        </Row>
-      </Card>
+      {/* ── Balance strip ── */}
+      <section className="bc-card bc-rise-2" style={{ padding: '24px 28px', marginBottom: 24, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
+        <div>
+          <div className="bc-stat-label" style={{ marginBottom: 8 }}>当前余额</div>
+          <div className="bc-num" style={{ fontSize: 'clamp(34px, 4vw, 44px)', color: 'var(--gold-400)' }}>
+            {user?.balance ?? 0}
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--text-muted)', marginLeft: 8, letterSpacing: '0.1em' }}>BC</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+          <Meta label="角色">
+            <span className="bc-chip bc-chip--emerald">{user?.role === 'merchant' ? '商户' : user?.role}</span>
+          </Meta>
+          <Meta label="用户名">
+            <span className="bc-mono" style={{ fontSize: 14, color: 'var(--paper-100)' }}>@{user?.username}</span>
+          </Meta>
+        </div>
+      </section>
 
-      {/* 粘贴 token */}
-      <Card title="粘贴 Token JSON">
-        <Paragraph type="secondary" style={{ fontSize: 13 }}>
-          token 形如：<Text code style={{ fontSize: 12 }}>
+      {/* ── Safety banner ── */}
+      <Alert
+        className="bc-rise-2"
+        message="教授 M6.md 必做 #3：本地预验签"
+        description="粘贴 token 后会立即调用前端 verifySig 验证 s'·G == R' + e'·P，通过 ✓ 后才能提交存款。这只是 UX/教学手段，服务器仍会独立做 verifySig + 双花检测，本地结果不替代服务器判定。"
+        type="warning"
+        showIcon
+        style={{ marginBottom: 24 }}
+      />
+
+      {/* ── 粘贴 token ── */}
+      <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>粘贴 Token JSON</h2>
+        <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
+          client verify-sig · 300ms debounce
+        </p>
+        <Paragraph type="secondary" style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>
+          token 形如：<span className="bc-mono bc-scalar" style={{ display: 'inline', padding: '2px 6px' }}>
             {`{ "serial": "...64hex", "amount": 30, "R_prime": "...66hex", "s_prime": "...64hex" }`}
-          </Text>
+          </span>
         </Paragraph>
         <TextArea
           value={rawText}
           onChange={(e) => setRawText(e.target.value)}
           autoSize={{ minRows: 6, maxRows: 12 }}
           placeholder={`{ "serial": "...", "amount": 30, "R_prime": "...", "s_prime": "..." }`}
-          style={{ fontFamily: 'monospace', fontSize: 12 }}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
         />
-        <Space style={{ marginTop: 12 }}>
-          <Button
-            icon={<CopyOutlined />}
-            onClick={copyToken}
-            disabled={preview.phase !== 'ok'}
-          >
+        <Space style={{ marginTop: 18 }}>
+          <Button icon={<CopyOutlined />} onClick={copyToken} disabled={preview.phase !== 'ok'}>
             复制 token
           </Button>
           <Button
@@ -366,14 +328,18 @@ export default function PaymentPage() {
             提交存款
           </Button>
         </Space>
-      </Card>
+      </section>
 
-      {/* 预验签结果 */}
-      <Card title="本地预验签" size="small">
+      {/* ── 本地预验签 ── */}
+      <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>本地预验签</h2>
+        <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
+          s'·G ?= R' + e'·P
+        </p>
         {previewBadge}
 
         {preview.phase === 'ok' && preview.token && (
-          <Descriptions column={1} bordered size="small" style={{ marginTop: 12 }}>
+          <Descriptions column={1} bordered size="small" style={{ marginTop: 16 }}>
             <Descriptions.Item label="serial (32B)">
               <Text code copyable style={{ fontSize: 12 }}>{preview.token.serial}</Text>
             </Descriptions.Item>
@@ -388,11 +354,12 @@ export default function PaymentPage() {
             </Descriptions.Item>
           </Descriptions>
         )}
-      </Card>
+      </section>
 
-      {/* 提交结果 */}
+      {/* ── 存款结果 ── */}
       {result && (
-        <Card title="存款结果" size="small">
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 18 }}>存款结果</h2>
           {result.kind === 'success' ? (
             <Result
               status="success"
@@ -443,26 +410,38 @@ export default function PaymentPage() {
               }
             />
           )}
-        </Card>
+        </section>
       )}
 
-      {/* 双花演示说明（始终展示，便于教学） */}
-      <Card size="small" title="关于双花演示">
-        <Paragraph style={{ fontSize: 13, marginBottom: 0 }}>
-          <Text strong>两条路径：</Text>
+      {/* ── 双花演示说明 ── */}
+      <section className="bc-card" style={{ padding: 28 }}>
+        <h2 className="bc-display" style={{ fontSize: 20, marginBottom: 16 }}>关于双花演示</h2>
+        <Paragraph style={{ fontSize: 13.5, marginBottom: 10, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
+          <Text strong style={{ color: 'var(--paper-100)' }}>两条路径：</Text>
         </Paragraph>
-        <Paragraph style={{ fontSize: 13, marginBottom: 0 }}>
-          1. <Text code>单商户连续重提</Text>（本页直接演示）：同一 token 提交两次，
+        <Paragraph style={{ fontSize: 13.5, marginBottom: 12, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
+          1. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>单商户连续重提</span>（本页直接演示）：同一 token 提交两次，
           第二次必然 <Tag color="red">409 DOUBLE_SPEND</Tag>，
-          因 <Text code>spent_coins.serial PRIMARY KEY</Text> 已存在。
+          因 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>spent_coins.serial PRIMARY KEY</span> 已存在。
         </Paragraph>
-        <Paragraph style={{ fontSize: 13 }}>
-          2. <Text code>双商户并发提交</Text>（开两个标签页）：两个商户同时收到同一 token
-          并发提交，服务器 <Text code>BEGIN IMMEDIATE</Text> 串行化，
+        <Paragraph style={{ fontSize: 13.5, marginBottom: 0, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
+          2. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>双商户并发提交</span>（开两个标签页）：两个商户同时收到同一 token
+          并发提交，服务器 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>BEGIN IMMEDIATE</span> 串行化，
           一个 <Tag color="green">200</Tag> + 一个 <Tag color="red">409</Tag>，
-          <Text strong>具体哪个成功由调度决定，不保证先发起者赢</Text>（教授 M6.md #2）。
+          <Text strong style={{ color: 'var(--paper-100)' }}>具体哪个成功由调度决定，不保证先发起者赢</Text>（教授 M6.md #2）。
         </Paragraph>
-      </Card>
-    </Space>
+      </section>
+    </div>
+  );
+}
+
+function Meta({ label, children }) {
+  return (
+    <div>
+      <div className="bc-mono" style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 6 }}>
+        {label}
+      </div>
+      {children}
+    </div>
   );
 }
