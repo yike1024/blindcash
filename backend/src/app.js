@@ -1,9 +1,10 @@
-// BlindCash backend entry — M1 + M3 + M4
+// BlindCash backend entry — M1 + M3 + M4 + M5
 //
 // M1 scope: health check + auth routes (register/login with role).
 // M3 scope: bank keypair provisioning on boot + GET /api/bank/pubkey.
 // M4 scope: 4-move withdrawal protocol (init/submit/reveal/cancel).
-// Later milestones mount /payment, /accounts routes.
+// M5 scope: payment endpoint (POST /api/payment, merchant-only).
+// Later milestones mount /accounts routes.
 
 import express from 'express';
 import cors from 'cors';
@@ -14,6 +15,7 @@ import { bytesToHex } from './utils/hex.js';
 import authRoutes from './routes/auth.js';
 import bankRoutes from './routes/bank.js';
 import withdrawalRoutes from './routes/withdrawal.js';
+import paymentRoutes from './routes/payment.js';
 
 // NOTE: blindcash uses port 4100 (NOT 4000) so it can run side-by-side with
 // the cryptobank project (which uses 4000). The Vite dev server runs on 5174
@@ -43,7 +45,7 @@ export function initDatabase() {
 
 // Health check (namespaced under /api for consistency with the Vite proxy)
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'blindcash-backend', milestone: 'M4' });
+  res.json({ status: 'ok', service: 'blindcash-backend', milestone: 'M5' });
 });
 
 // Auth routes (register + login — both accept/return a role)
@@ -56,6 +58,12 @@ app.use('/api/bank', bankRoutes);
 // Withdrawal routes (M4): 4-move protocol — customer-only (requireRole('customer')
 // inside the router enforces ISOLATION §一 that /withdraw/* moves customer.balance).
 app.use('/api/withdraw', withdrawalRoutes);
+
+// Payment routes (M5): merchant-only — POST /api/payment deposits a withdrawn
+// token to the merchant's balance. ISOLATION §一-2 (merchant.balance is ONLY
+// mutated here). Format gate + verifySig + atomic BEGIN IMMEDIATE live in
+// paymentService.js.
+app.use('/api/payment', paymentRoutes);
 
 // Only start the HTTP server when running as the main entry (not when
 // imported by test files — supertest creates its own server from app).

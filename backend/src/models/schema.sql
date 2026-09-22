@@ -1,17 +1,17 @@
--- BlindCash DDL (SQLite, WAL mode) — M1 + M3
+-- BlindCash DDL (SQLite, WAL mode) — M1 + M3 + M4 + M5
 --
 -- M1 scope: users table (identity + role + fiat balance).
 -- M3 scope: bank_keys table (singleton bank signing keypair).
--- Later milestones add:
---   withdrawal_sessions  (M4 — 4-move protocol state machine)
---   spent_coins          (M5 — double-spend detection)
+-- M4 scope: withdrawal_sessions table (4-move protocol state machine).
+-- M5 scope: spent_coins table (double-spend detection, used by /api/payment).
 --
 -- Design notes (v3 §3.3 invariants, see ISOLATION.md):
 --   * role is CHECK-constrained to ('customer','merchant') — mutually exclusive.
 --   * balance is the fiat account balance:
 --       customer.balance is ONLY decremented by /withdraw/* (init debits,
---         cancel/refund credits back).
---       merchant.balance is ONLY incremented by /payment.
+--         cancel/refund credits back). Initial 100 credited on registration
+--         (M5: see userService.js INITIAL_BALANCE_CUSTOMER — 教学用).
+--       merchant.balance is ONLY incremented by /payment (M5).
 --   * There is NO numeric-satoshi-vs-yuan ambiguity at M1: balance is an
 --     integer in the smallest unit; presentation formatting is a UI concern.
 
