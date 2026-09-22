@@ -8,7 +8,8 @@
 
 import express from 'express';
 import cors from 'cors';
-import { initSchema } from './models/db.js';
+import { getDb, closeDb } from './models/db.js';
+import { runMigrations } from './utils/migrationRunner.js';
 import { getOrGenerate } from './services/bankKeyService.js';
 import { bytesToHex } from './utils/hex.js';
 
@@ -28,18 +29,24 @@ app.use(cors({ origin: ['http://localhost:5174', 'http://127.0.0.1:5174'] }));
 app.use(express.json({ limit: '1mb' }));
 
 /**
- * Initialize DB schema + ensure the bank signing keypair exists.
+ * Initialize DB schema via migrations + ensure the bank signing keypair exists.
  * Called ONLY when the server actually starts (app.listen), NOT at module
  * import time — so test files that import app for supertest don't initialize
  * the production DB before BC_DB_PATH is set.
  *
- * M3 addition: after initSchema(), call bankKeyService.getOrGenerate() to
+ * Phase 0 (v5 §二 H1): now calls runMigrations() directly instead of the
+ * legacy initSchema() — same effect, more explicit. On failure, throws and
+ * the caller (app.listen path below) lets the process exit with non-zero.
+ *
+ * M3 addition: after runMigrations(), call bankKeyService.getOrGenerate() to
  * provision the singleton row in bank_keys. On first boot this generates a
  * fresh keypair; on subsequent boots it reads the existing row back (no
  * regeneration — would invalidate previously-issued tokens).
  */
 export function initDatabase() {
-  initSchema();
+  closeDb();  // reset singleton against current BC_DB_PATH (in case it changed)
+  const db = getDb();
+  runMigrations(db);
   const kp = getOrGenerate();
   console.log(`[backend] Bank public key: ${bytesToHex(kp.publicKey)}`);
 }

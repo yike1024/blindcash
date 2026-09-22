@@ -7,14 +7,18 @@
 // WAL mode: concurrent reads + serialized writes. BEGIN IMMEDIATE acquires the
 // write lock up-front → a concurrent double-spend attempt blocks until the
 // first transaction commits, then sees the spent row.
+//
+// Phase 0 (v5): initSchema() now delegates to migrationRunner.runMigrations().
+// schema.sql is kept as legacy reference for the baseline content (the
+// canonical source is now migrations/001_init_baseline.sql — they MUST match).
+// Existing test files that call initSchema() keep working transparently.
 
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { runMigrations } from '../utils/migrationRunner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCHEMA_PATH = join(__dirname, 'schema.sql');
 
 let _db = null;
 
@@ -58,8 +62,15 @@ export function closeDb() {
 }
 
 /**
- * Run the schema.sql DDL. Idempotent (CREATE TABLE IF NOT EXISTS).
- * Safe to call on every backend boot.
+ * Initialize DB schema via the migration runner. Idempotent — safe to call
+ * on every boot and on test setup. Delegates to runMigrations() which:
+ *   - applies baseline (001_init_baseline.sql) on fresh DBs
+ *   - marks version=1 without re-executing baseline on legacy dev DBs
+ *   - applies any subsequent pending migrations in version order
+ *
+ * Phase 0 (v5 §二 H1): initSchema() is now a thin wrapper so existing test
+ * files (which call initSchema() at module load) keep working without change.
+ * app.js's initDatabase() calls runMigrations() directly for explicitness.
  *
  * NOTE: calls closeDb() first so that if process.env.BC_DB_PATH changed
  * (e.g. a test file switching to its own test DB), the singleton _db is
@@ -68,8 +79,7 @@ export function closeDb() {
 export function initSchema() {
   closeDb();
   const db = getDb();
-  const sql = readFileSync(SCHEMA_PATH, 'utf8');
-  db.exec(sql);
+  runMigrations(db);
 }
 
 /**
