@@ -20,7 +20,8 @@
 import { Point } from '@noble/secp256k1';
 import { G, modN } from './curve.js';
 import { hashToScalar } from './hashToScalar.js';
-import { TOKEN_DOMAIN_TAG } from '../../config/bank.js';
+// M7 修复：从 client/protocolConstants.js 拿（零 Node 依赖），原因同 schnorrBlind.js
+import { TOKEN_DOMAIN_TAG } from '../client/protocolConstants.js';
 
 /**
  * Verify a single revealed candidate (i ≠ j).

@@ -12,7 +12,10 @@
 
 import { Point, G, n, modN } from '../server/curve.js';
 import { hashToScalar } from '../server/hashToScalar.js';
-import { TOKEN_DOMAIN_TAG } from '../../config/bank.js';
+// M7 修复：从 protocolConstants.js 拿（零 Node 依赖），不再从 config/bank.js 拿
+// （后者用 process.env，被 vite-plugin-node-polyfills 注入 shim 后从 backend
+// 目录解析 'vite-plugin-node-polyfills/...' 失败，导致前端 vite build 报错）
+import { TOKEN_DOMAIN_TAG } from './protocolConstants.js';
 
 /**
  * User-side: compute the blinded challenge triple (R', e', e) from inputs.

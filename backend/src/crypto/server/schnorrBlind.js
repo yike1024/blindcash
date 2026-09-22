@@ -37,7 +37,13 @@ import {
   isValidScalar,
 } from './curve.js';
 import { hashToScalar } from './hashToScalar.js';
-import { TOKEN_DOMAIN_TAG } from '../../config/bank.js';
+// M7 修复：从 client/protocolConstants.js 拿（零 Node 依赖，浏览器可跑）。
+// 不再从 ../../config/bank.js 拿——后者用 process.env，前端 vite 通过 @crypto
+// 别名间接 import 时会触发 vite-plugin-node-polyfills 注入 process shim，而
+// shim 包只装在 frontend/node_modules，从 backend 目录解析失败 → vite build 报错。
+// 后端 config/bank.js 仍 re-export TOKEN_DOMAIN_TAG 供后端服务（withdrawalService
+// 等）使用，但 crypto/* 模块直接走 protocolConstants.js 单源。
+import { TOKEN_DOMAIN_TAG } from '../client/protocolConstants.js';
 
 /**
  * Generate a fresh bank keypair.
