@@ -1,8 +1,10 @@
 // App.jsx — React Router configuration
 //
 // M1 scope: register / login / dashboard (placeholder).
-// M6 step 1: /withdraw  (customer-only) — 4-move 取款向导.
-// M6 step 2: /payment   (merchant-only) — 粘贴 token + 预验签 + 存款 + 双花演示.
+// M6 step 1: /withdraw — 4-move 取款向导.
+// M6 step 2: /payment  — 粘贴 token + 预验签 + 存款 + 双花演示.
+// M7: 角色解锁——任何登录用户都能取款/收款/看历史，形成 Chaum 式闭环。
+//      新增 /history 账本流水页。
 
 import { Routes, Route, Navigate } from 'react-router-dom';
 import AppLayout from './components/AppLayout.jsx';
@@ -12,6 +14,7 @@ import LoginPage from './pages/Login.jsx';
 import DashboardPage from './pages/Dashboard.jsx';
 import WithdrawPage from './pages/Withdraw.jsx';
 import PaymentPage from './pages/Payment.jsx';
+import HistoryPage from './pages/History.jsx';
 
 export default function App() {
   return (
@@ -29,24 +32,12 @@ export default function App() {
         }
       >
         <Route path="/dashboard" element={<DashboardPage />} />
-        {/* M6 step 1: customer-only 取款向导 */}
-        <Route
-          path="/withdraw"
-          element={
-            <ProtectedRoute role="customer">
-              <WithdrawPage />
-            </ProtectedRoute>
-          }
-        />
-        {/* M6 step 2: merchant-only 收款 / 双花演示 */}
-        <Route
-          path="/payment"
-          element={
-            <ProtectedRoute role="merchant">
-              <PaymentPage />
-            </ProtectedRoute>
-          }
-        />
+        {/* M7: 角色解锁——任何登录用户都可取款 */}
+        <Route path="/withdraw" element={<WithdrawPage />} />
+        {/* M7: 角色解锁——任何登录用户都可收款 */}
+        <Route path="/payment" element={<PaymentPage />} />
+        {/* M7: 任何登录用户都可看自己的账本流水 */}
+        <Route path="/history" element={<HistoryPage />} />
       </Route>
 
       {/* Fallback */}

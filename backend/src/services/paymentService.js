@@ -37,6 +37,7 @@ import { getPublicKey } from './bankKeyService.js';
 import { verifySig } from '../crypto/server/schnorrBlind.js';
 import { n, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { hexToBytes } from '../utils/hex.js';
+import { recordTransaction } from './transactionService.js';
 
 /**
  * Error carrying an HTTP status. Routes catch this and map to res.status().
@@ -250,6 +251,18 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime }
     db.prepare(
       `UPDATE users SET balance = balance + ? WHERE id = ?`,
     ).run(amount, merchant_id);
+
+    // M7: 写一笔 deposit 流水，让商户在 /history 看到收款去向。
+    // counterparty = NULL（Chaum 盲现：token 匿名，商户无法知道付款人）。
+    recordTransaction(db, {
+      user_id: merchant_id,
+      kind: 'deposit',
+      amount,
+      counterparty: null,
+      serial: serialBytes,
+      session_id: null,
+      note: '收款',
+    });
 
     const row = db.prepare(
       `SELECT balance FROM users WHERE id = ?`,

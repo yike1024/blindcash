@@ -174,6 +174,7 @@ beforeAll(async () => {
   const db = getDb();
   db.exec('DELETE FROM withdrawal_sessions;');
   db.exec('DELETE FROM spent_coins;');
+  db.exec('DELETE FROM transactions;');
   db.exec('DELETE FROM users;');
   db.exec('DELETE FROM bank_keys;');
 
@@ -193,6 +194,7 @@ beforeEach(() => {
   const db = getDb();
   db.exec('DELETE FROM withdrawal_sessions;');
   db.exec('DELETE FROM spent_coins;');
+  db.exec('DELETE FROM transactions;');
   // reset balances: customer=100, merchant=0 (users registered in beforeAll)
   setBalance(customerId, 100);
   setBalance(merchantId, 0);
@@ -245,10 +247,15 @@ describe('M4: validation errors', () => {
     expect(res.body.error).toBe('INVALID_AMOUNT');
   });
 
-  it('merchant calls init → 403', async () => {
+  it('merchant calls init → 201 (M7: 角色锁已解锁，任何登录用户都能取款)', async () => {
+    // 先给 merchant 余额（注册时 merchant 余额为 0）
+    setBalance(merchantId, 100);
     const res = await api('/api/withdraw/init', { method: 'POST', token: merchantToken, body: { amount: 10 } });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe('FORBIDDEN');
+    expect(res.status).toBe(201);
+    expect(res.body.amount).toBe(10);
+    // 清理：取消该 session 退回余额
+    await api('/api/withdraw/cancel', { method: 'POST', token: merchantToken, body: { session_id: res.body.session_id } });
+    setBalance(merchantId, 0);
   });
 
   it('candidate count ≠ N → 400', async () => {
@@ -454,10 +461,15 @@ describe('M4: cancel flow', () => {
     expect(sess.status).toBe('cancelled');
   });
 
-  it('merchant cancel customer session → 403 (role guard)', async () => {
+  it('merchant cancel customer session → 404 (M7: 角色锁已解锁，但 session 归属仍隔离)', async () => {
+    // 角色锁虽解锁，但 cancelWithdrawal 查询带 customer_id = req.user.userId，
+    // merchant 不是 session 的 owner → 查不到 → 404 SESSION_NOT_FOUND
     const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
     const res = await api('/api/withdraw/cancel', { method: 'POST', token: merchantToken, body: { session_id: init.body.session_id } });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('SESSION_NOT_FOUND');
+    // 清理 customer 的 active session
+    await api('/api/withdraw/cancel', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id } });
   });
 
   it('cancel committed session → 400 (irreversible)', async () => {

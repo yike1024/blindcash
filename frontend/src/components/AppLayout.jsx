@@ -29,8 +29,9 @@ export default function AppLayout() {
 
   const navItems = [
     { to: '/dashboard', label: '仪表盘' },
-    ...(user?.role === 'customer' ? [{ to: '/withdraw', label: '取款' }] : []),
-    ...(user?.role === 'merchant' ? [{ to: '/payment', label: '收款' }] : []),
+    { to: '/withdraw', label: '取款' },
+    { to: '/payment', label: '收款' },
+    { to: '/history', label: '历史' },
   ];
 
   return (

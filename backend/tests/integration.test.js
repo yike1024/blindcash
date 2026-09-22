@@ -173,6 +173,7 @@ beforeAll(async () => {
   const db = getDb();
   db.exec('DELETE FROM withdrawal_sessions;');
   db.exec('DELETE FROM spent_coins;');
+  db.exec('DELETE FROM transactions;');
   db.exec('DELETE FROM users;');
   db.exec('DELETE FROM bank_keys;');
 
@@ -218,6 +219,7 @@ beforeEach(() => {
   const db = getDb();
   db.exec('DELETE FROM withdrawal_sessions;');
   db.exec('DELETE FROM spent_coins;');
+  db.exec('DELETE FROM transactions;');
   // reset balances: customer=100, merchants=0
   setBalance(customerId, 100);
   setBalance(customer2Id, 100);
@@ -352,19 +354,28 @@ describe('M7 · cross-user access denied', () => {
     expect(alice.balance).toBe(90); // 100 - 10
   });
 
-  it('merchant cannot call /api/withdraw/init → 403 (role guard)', async () => {
+  it('merchant can call /api/withdraw/init → 201 (M7: 角色锁已解锁)', async () => {
+    // M7: 角色锁去掉后，merchant 也能取款，形成真·转账闭环
+    setBalance(merchantAId, 100); // 给 merchant 余额
     const init = await api('/api/withdraw/init', {
       method: 'POST', token: merchantAToken, body: { amount: 10 },
     });
-    expect(init.status).toBe(403);
+    expect(init.status).toBe(201);
+    // 清理
+    await api('/api/withdraw/cancel', {
+      method: 'POST', token: merchantAToken, body: { session_id: init.body.session_id },
+    });
+    setBalance(merchantAId, 0);
   });
 
-  it('customer cannot call /api/payment → 403 (role guard)', async () => {
+  it('customer can call /api/payment → 400 SIGNATURE_INVALID (M7: 角色锁已解锁，但 token 无效仍被拒)', async () => {
+    // M7: 角色锁去掉后，customer 不再被 403 挡。但这里传的是无效 token，
+    // 服务器 verifySig 仍会拒绝 → 400 SIGNATURE_INVALID（crypto 才是安全边界）。
     const dep = await api('/api/payment', {
       method: 'POST', token: customerToken,
       body: { serial: '0'.repeat(64), amount: 1, R_prime: '02' + '0'.repeat(64), s_prime: '0'.repeat(64) },
     });
-    expect(dep.status).toBe(403);
+    expect(dep.status).toBe(400);
   });
 });
 

@@ -1,15 +1,12 @@
-// pages/Payment.jsx — merchant 收款 / 双花演示 (vault restyle)
+// pages/Payment.jsx — 收款（粘贴 token → 本地预验签 → 存款）
 //
 // ALL CRYPTO LOGIC, DEBOUNCED PREVIEW, VERIFY-SIG FLOW PRESERVED VERBATIM.
-// Only the presentation layer is restyled to the Cryptographic Vault system.
-//
-//   🟡 #3 merchant 本地预验签: 粘贴 token 后先调前端 verifySig 显示 ✓ 再提交.
-//   🟡 #2 双花演示时序不确定: UI 用状态码判断, 不写"第一个一定成功".
+// M7: 清除教学脚手架文案，角色锁已解锁（任何登录用户都能收款）。
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Input, Alert, Button, Space, Typography, Descriptions, Tag,
-  message, Result, Spin,
+  message, Result, Spin, Collapse,
 } from 'antd';
 import {
   CheckCircleTwoTone, CloseCircleTwoTone, CopyOutlined, ThunderboltOutlined,
@@ -249,8 +246,7 @@ export default function PaymentPage() {
           <Space direction="vertical" size="small">
             <Text>{preview.reason}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              本地预验签只是 UX/教学：任何人都能用银行公钥 P 验证 s'·G == R' + e'·P。
-              但本地通过 ≠ 服务器一定接受（双花/并发仍会被 409）。服务器 verifySig 是最终权威。
+              本地通过 ≠ 服务器一定接受（双花/并发仍会被 409）。服务器 verifySig 是最终权威。
             </Text>
           </Space>
         }
@@ -262,7 +258,7 @@ export default function PaymentPage() {
     <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
       {/* ── Page header ── */}
       <header className="bc-rise-1" style={{ marginBottom: 28 }}>
-        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>商户 · 收款终端</p>
+        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>收款</p>
         <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
           粘贴 token，本地预验签后存入
         </h1>
@@ -279,7 +275,7 @@ export default function PaymentPage() {
         </div>
         <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
           <Meta label="角色">
-            <span className="bc-chip bc-chip--emerald">{user?.role === 'merchant' ? '商户' : user?.role}</span>
+            <span className="bc-chip bc-chip--emerald">{user?.role === 'merchant' ? '商户' : user?.role === 'customer' ? '顾客' : user?.role}</span>
           </Meta>
           <Meta label="用户名">
             <span className="bc-mono" style={{ fontSize: 14, color: 'var(--paper-100)' }}>@{user?.username}</span>
@@ -290,9 +286,9 @@ export default function PaymentPage() {
       {/* ── Safety banner ── */}
       <Alert
         className="bc-rise-2"
-        message="教授 M6.md 必做 #3：本地预验签"
-        description="粘贴 token 后会立即调用前端 verifySig 验证 s'·G == R' + e'·P，通过 ✓ 后才能提交存款。这只是 UX/教学手段，服务器仍会独立做 verifySig + 双花检测，本地结果不替代服务器判定。"
-        type="warning"
+        message="粘贴 token 后会自动本地预验签"
+        description="通过 ✓ 后才能提交存款。服务器仍会独立做 verifySig + 双花检测，本地结果不替代服务器判定。"
+        type="info"
         showIcon
         style={{ marginBottom: 24 }}
       />
@@ -389,19 +385,14 @@ export default function PaymentPage() {
                   <Alert
                     type="info"
                     showIcon
-                    message="教授 M6.md 必做 #2：双花时序不确定"
+                    message="双花被服务器正确检测"
                     description={
                       <Space direction="vertical" size="small">
                         <Text>
-                          本页演示的是「单商户连续重复提交」——服务器必然 409 (因 serial 已入库)。
+                          本页演示「连续重复提交」——服务器必然 409 (serial 已入库)。
                         </Text>
                         <Text>
-                          真实双花场景是<b>两个不同商户</b>同时收到同一 token 并发提交：
-                          服务器 <Text code>BEGIN IMMEDIATE</Text> 串行化，一个 200 + 一个 409；
-                          但具体哪个赢取决于调度，<b>不保证先发起者成功</b>。
-                        </Text>
-                        <Text>
-                          想看并发版：在两个浏览器标签登录两个商户账户，粘贴同一 token，几乎同时点「提交存款」。
+                          并发场景：两个标签页同时提交同一 token，服务器串行化，一个 200 + 一个 409，哪个赢取决于调度。
                         </Text>
                       </Space>
                     }
@@ -413,23 +404,30 @@ export default function PaymentPage() {
         </section>
       )}
 
-      {/* ── 双花演示说明 ── */}
+      {/* ── 双花演示说明（可折叠） ── */}
       <section className="bc-card" style={{ padding: 28 }}>
-        <h2 className="bc-display" style={{ fontSize: 20, marginBottom: 16 }}>关于双花演示</h2>
-        <Paragraph style={{ fontSize: 13.5, marginBottom: 10, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
-          <Text strong style={{ color: 'var(--paper-100)' }}>两条路径：</Text>
-        </Paragraph>
-        <Paragraph style={{ fontSize: 13.5, marginBottom: 12, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
-          1. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>单商户连续重提</span>（本页直接演示）：同一 token 提交两次，
-          第二次必然 <Tag color="red">409 DOUBLE_SPEND</Tag>，
-          因 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>spent_coins.serial PRIMARY KEY</span> 已存在。
-        </Paragraph>
-        <Paragraph style={{ fontSize: 13.5, marginBottom: 0, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
-          2. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>双商户并发提交</span>（开两个标签页）：两个商户同时收到同一 token
-          并发提交，服务器 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>BEGIN IMMEDIATE</span> 串行化，
-          一个 <Tag color="green">200</Tag> + 一个 <Tag color="red">409</Tag>，
-          <Text strong style={{ color: 'var(--paper-100)' }}>具体哪个成功由调度决定，不保证先发起者赢</Text>（教授 M6.md #2）。
-        </Paragraph>
+        <Collapse
+          ghost
+          items={[{
+            key: 'double-spend',
+            label: <span className="bc-display" style={{ fontSize: 18 }}>关于双花演示</span>,
+            children: (
+              <>
+                <Paragraph style={{ fontSize: 13.5, marginBottom: 12, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
+                  1. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>连续重提</span>：同一 token 提交两次，
+                  第二次必然 <Tag color="red">409 DOUBLE_SPEND</Tag>，
+                  因 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>spent_coins.serial PRIMARY KEY</span> 已存在。
+                </Paragraph>
+                <Paragraph style={{ fontSize: 13.5, marginBottom: 0, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
+                  2. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>双标签页并发提交</span>：两个标签页同时提交同一 token，
+                  服务器 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>BEGIN IMMEDIATE</span> 串行化，
+                  一个 <Tag color="green">200</Tag> + 一个 <Tag color="red">409</Tag>，
+                  <Text strong style={{ color: 'var(--paper-100)' }}>具体哪个成功由调度决定，不保证先发起者赢</Text>。
+                </Paragraph>
+              </>
+            ),
+          }]}
+        />
       </section>
     </div>
   );

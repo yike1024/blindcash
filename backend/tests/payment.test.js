@@ -170,6 +170,7 @@ beforeAll(async () => {
   const db = getDb();
   db.exec('DELETE FROM withdrawal_sessions;');
   db.exec('DELETE FROM spent_coins;');
+  db.exec('DELETE FROM transactions;');
   db.exec('DELETE FROM users;');
   db.exec('DELETE FROM bank_keys;');
 
@@ -194,6 +195,7 @@ beforeEach(() => {
   const db = getDb();
   db.exec('DELETE FROM withdrawal_sessions;');
   db.exec('DELETE FROM spent_coins;');
+  db.exec('DELETE FROM transactions;');
   // reset: customer=100 (teaching initial), both merchants=0
   setBalance(customerId, 100);
   setBalance(merchant1Id, 0);
@@ -389,8 +391,10 @@ describe('M5: tampered amount → verifySig fails 400', () => {
 // ROLE GUARD + AUTH
 // ════════════════════════════════════════════════════════════════
 
-describe('M5: role guard + authentication', () => {
-  it('customer calls /api/payment → 403 (ISOLATION §一-2)', async () => {
+describe('M5/M7: role guard unlocked + authentication', () => {
+  it('customer calls /api/payment → 200 (M7: 角色锁已解锁，任何登录用户都能收款)', async () => {
+    // 原来 customer 被 merchant 角色锁挡在 403；M7 解锁后 customer 也能存 token。
+    // 这样顾客取款后能把 token 转给另一个顾客存款，形成 Chaum 式闭环。
     const tok = await mintToken(30);
     const res = await api('/api/payment', {
       method: 'POST', token: customerToken,
@@ -399,8 +403,10 @@ describe('M5: role guard + authentication', () => {
         R_prime: tok.R_primeHex, s_prime: tok.s_primeHex,
       },
     });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe('FORBIDDEN');
+    expect(res.status).toBe(200);
+    expect(res.body.deposited).toBe(30);
+    // customer 取款 30 (100→70) 又存回 30 (70→100)，余额回到 100
+    expect(res.body.new_balance).toBe(100);
   });
 
   it('unauthenticated call (no token) → 401', async () => {

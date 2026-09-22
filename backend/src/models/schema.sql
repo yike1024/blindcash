@@ -1,9 +1,10 @@
--- BlindCash DDL (SQLite, WAL mode) — M1 + M3 + M4 + M5
+-- BlindCash DDL (SQLite, WAL mode) — M1 + M3 + M4 + M5 + M7
 --
 -- M1 scope: users table (identity + role + fiat balance).
 -- M3 scope: bank_keys table (singleton bank signing keypair).
 -- M4 scope: withdrawal_sessions table (4-move protocol state machine).
 -- M5 scope: spent_coins table (double-spend detection, used by /api/payment).
+-- M7 scope: transactions table (账本流水，让取款/收款/退款去向可见).
 --
 -- Design notes (v3 §3.3 invariants, see ISOLATION.md):
 --   * role is CHECK-constrained to ('customer','merchant') — mutually exclusive.
@@ -105,3 +106,29 @@ CREATE TABLE IF NOT EXISTS spent_coins (
 );
 CREATE INDEX IF NOT EXISTS idx_sc_merchant ON spent_coins(deposited_to, spent_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sc_token_hash ON spent_coins(token_hash);
+
+-- ── 账本层：交易流水（M7） ──
+-- 让取款去向可见：用户取款后能看到一笔 withdraw 流水；商户收款后看到
+-- 一笔 deposit 流水；cancel/expire/abort 退款看到 refund 流水。
+--
+-- 设计原则：
+--   * 流水只在「最终态」写入，不记录中间状态（init 只是锁定余额，不写流水；
+--     reveal 成功才写 withdraw；refund 只在 refundAndClose 内写）。
+--   * counterparty 对 withdraw/refund 为 'bank'（对手方是银行），对 deposit
+--     为 NULL（Chaum 盲现：token 匿名，商户无法知道付款人身份）。
+--   * serial 只对 deposit 非空（token 中的 32 字节 serial，便于追溯）。
+--   * session_id 对 withdraw/refund 非空（关联 withdrawal_sessions）。
+--   * 所有写动作都在调用方事务内执行（runImmediateTx），与 balance 变更原子。
+CREATE TABLE IF NOT EXISTS transactions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,                -- 流水所属用户
+    kind          TEXT NOT NULL CHECK(kind IN ('withdraw','deposit','refund')),
+    amount        INTEGER NOT NULL,                -- 正整数；始终为正（方向由 kind 决定）
+    counterparty  TEXT,                            -- 'bank' / NULL（deposit 匿名）
+    serial        BLOB,                            -- 32B coin serial（仅 deposit）
+    session_id    TEXT,                            -- withdrawal session（仅 withdraw/refund）
+    note          TEXT,                            -- 人类可读备注
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tx_user_time ON transactions(user_id, created_at DESC);

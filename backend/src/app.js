@@ -1,10 +1,10 @@
-// BlindCash backend entry — M1 + M3 + M4 + M5
+// BlindCash backend entry — M1 + M3 + M4 + M5 + M7
 //
 // M1 scope: health check + auth routes (register/login with role).
 // M3 scope: bank keypair provisioning on boot + GET /api/bank/pubkey.
 // M4 scope: 4-move withdrawal protocol (init/submit/reveal/cancel).
-// M5 scope: payment endpoint (POST /api/payment, merchant-only).
-// Later milestones mount /accounts routes.
+// M5 scope: payment endpoint (POST /api/payment).
+// M7 scope: transactions 账本表 + GET /api/transactions + 角色解锁闭环.
 
 import express from 'express';
 import cors from 'cors';
@@ -16,6 +16,7 @@ import authRoutes from './routes/auth.js';
 import bankRoutes from './routes/bank.js';
 import withdrawalRoutes from './routes/withdrawal.js';
 import paymentRoutes from './routes/payment.js';
+import transactionsRoutes from './routes/transactions.js';
 
 // NOTE: blindcash uses port 4100 (NOT 4000) so it can run side-by-side with
 // the cryptobank project (which uses 4000). The Vite dev server runs on 5174
@@ -45,7 +46,7 @@ export function initDatabase() {
 
 // Health check (namespaced under /api for consistency with the Vite proxy)
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'blindcash-backend', milestone: 'M5' });
+  res.json({ status: 'ok', service: 'blindcash-backend', milestone: 'M7' });
 });
 
 // Auth routes (register + login — both accept/return a role)
@@ -55,15 +56,17 @@ app.use('/api/auth', authRoutes);
 // the bank's public key P for local signature verification.
 app.use('/api/bank', bankRoutes);
 
-// Withdrawal routes (M4): 4-move protocol — customer-only (requireRole('customer')
-// inside the router enforces ISOLATION §一 that /withdraw/* moves customer.balance).
+// Withdrawal routes (M4/M7): 4-move protocol — any logged-in user can withdraw
+// (role lock removed for Chaum-style transfer closure).
 app.use('/api/withdraw', withdrawalRoutes);
 
-// Payment routes (M5): merchant-only — POST /api/payment deposits a withdrawn
-// token to the merchant's balance. ISOLATION §一-2 (merchant.balance is ONLY
-// mutated here). Format gate + verifySig + atomic BEGIN IMMEDIATE live in
-// paymentService.js.
+// Payment routes (M5/M7): POST /api/payment deposits a withdrawn token to any
+// logged-in user's balance. Format gate + verifySig + atomic BEGIN IMMEDIATE
+// live in paymentService.js.
 app.use('/api/payment', paymentRoutes);
+
+// Transactions routes (M7): GET /api/transactions — current user's ledger.
+app.use('/api/transactions', transactionsRoutes);
 
 // Only start the HTTP server when running as the main entry (not when
 // imported by test files — supertest creates its own server from app).

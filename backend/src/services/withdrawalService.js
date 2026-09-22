@@ -26,6 +26,7 @@ import { verifyRevealed, pickRandomJ } from '../crypto/server/cutAndChoose.js';
 import { randomScalar, scalarToBytes, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '../utils/hex.js';
 import { CUT_AND_CHOOSE_N, SESSION_TTL_MS } from '../config/bank.js';
+import { recordTransaction } from './transactionService.js';
 
 /**
  * Error carrying an HTTP status. Routes catch this and map to res.status().
@@ -65,6 +66,16 @@ function refundAndClose(db, session, newStatus) {
     .run(session.amount, session.customer_id);
   db.prepare(`UPDATE withdrawal_sessions SET status = ? WHERE id = ?`)
     .run(newStatus, session.id);
+  // M7: 写一笔 refund 流水，让用户在 /history 看到退款去向。
+  recordTransaction(db, {
+    user_id: session.customer_id,
+    kind: 'refund',
+    amount: session.amount,
+    counterparty: 'bank',
+    serial: null,
+    session_id: session.id,
+    note: `退款 (${newStatus})`,
+  });
 }
 
 /**
@@ -353,6 +364,19 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
     db.prepare(
       `UPDATE withdrawal_sessions SET status = 'committed' WHERE id = ?`,
     ).run(session_id);
+
+    // M7: 写一笔 withdraw 流水，让用户在 /history 看到取款去向。
+    // counterparty = 'bank'（对手方是银行）；serial 留空（token 的 serial
+    // 存在 session.candidates[j].serial，但这里不提取，流水层只记金额与方向）。
+    recordTransaction(db, {
+      user_id: customer_id,
+      kind: 'withdraw',
+      amount: session.amount,
+      counterparty: 'bank',
+      serial: null,
+      session_id,
+      note: '取款',
+    });
 
     return { s_j: scalarToHex(sJ) };
   });
