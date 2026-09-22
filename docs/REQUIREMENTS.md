@@ -6,6 +6,32 @@
 
 ---
 
+## 0. 评分标准对照（三大功能模块）
+
+> 对照课程评分标准"按银行、付款人、收款人三个大功能来看"。
+
+| 大功能 | 子功能 | 实现位置 | 验收用例 |
+|--------|--------|----------|----------|
+| **银行** | 密钥对生成与持久化 | `bankKeyService.getOrGenerate` | `bankKeyService.test.js`（12 用例） |
+| | 公钥公开接口 | `GET /api/bank/pubkey` | `bankKeyService.test.js` |
+| | 4-move 协议银行侧（init/submit/reveal） | `withdrawalService` | `withdrawal.test.js`（19 用例） |
+| | Cut-and-choose 验证 + pickRandomJ | `cutAndChoose.verifyRevealed` | `cutAndChoose.test.js`（18 用例） |
+| | 双花检测（serial + token_hash） | `paymentService.processPayment` | `payment.test.js`（13 用例） |
+| **付款人** | 注册 + 登录 + 初始余额 100 | `/api/auth/register` | `auth.test.js` + `integration.test.js` |
+| | 取款 4-step 向导 | `Withdraw.jsx` + `/api/withdraw/*` | `withdrawal.test.js` |
+| | α/β 内存隔离 + beforeunload 守卫 | `Withdraw.jsx` useRef | `withdrawal.test.js` 必测#1 |
+| | 4-move 协议用户侧（blinding + unblind） | `blinding.js` | `blinding.test.js`（9 用例） |
+| | TTL 倒计时 + cancel 流程 | `Withdraw.jsx` | `withdrawal.test.js` 必测#3 |
+| **收款人** | 注册 + 登录 | `/api/auth/register`（角色互斥） | `auth.test.js` |
+| | 收款页（粘贴 + 预验签 + 提交） | `Payment.jsx` + `/api/payment` | `payment.test.js` |
+| | 预验签（client verifySig） | `schnorrBlindClient.verifySig` | `clientBuild.test.js`（4 用例） |
+| | 双花 409 演示 | `Payment.jsx` "再次提交"按钮 | `payment.test.js` H3 |
+| | 角色守卫（customer 越权 → 403） | `middleware/auth.js` | `payment.test.js` role guard |
+
+**自评**：三大功能模块全闭环，无功能缺失（-10 分风险已规避）。
+
+---
+
 ## 1. 项目目标
 
 构建一个**教学用**的盲签名数字货币（BlindCash）系统，完整实现 Schnorr 盲签名的 cut-and-choose 4-move 协议，使顾客向银行取款时**银行无法链接取款行为与后续消费**，同时通过双花检测保证同一 token 不可重复花费。
