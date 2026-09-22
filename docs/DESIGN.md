@@ -107,7 +107,7 @@
     │                                  │   INSERT session(pending, +5min)│
     │                                  │  COMMIT                          │
     │  { session_id, R: [N×hex66],     │                                  │
-    │    amount, N }                    │                                  │
+    │    amount, N, ttl_ms }           │                                  │
     │◀─────────────────────────────────│                                  │
     │                                  │                                  │
     │  for i in 0..N-1:                 │                                  │
@@ -296,7 +296,7 @@ s'·G = (s + α)·G = (k + e·x + α)·G = R + α·G + e·x·G
 
 | 方法 | 路径 | 请求 | 成功 | 失败 |
 |---|---|---|---|---|
-| POST | `/api/withdraw/init` | `{ amount }` | 201 `{ session_id, R: [hex66×N], amount, N }` | 400 `INVALID_AMOUNT` / `INSUFFICIENT_BALANCE`；409 `ACTIVE_SESSION_EXISTS` |
+| POST | `/api/withdraw/init` | `{ amount }` | 201 `{ session_id, R: [hex66×N], amount, N, ttl_ms }` | 400 `INVALID_AMOUNT` / `INSUFFICIENT_BALANCE`；409 `ACTIVE_SESSION_EXISTS` |
 | POST | `/api/withdraw/submit` | `{ session_id, candidates: [{ e:hex64, R_prime:hex66, serial:hex64 }×N] }` | 200 `{ j }` | 400 `BLINDER_LEAKED` / `INVALID_CANDIDATE` / `CANDIDATE_COUNT` / `SESSION_EXPIRED`；404 `SESSION_NOT_FOUND`；409 `WRONG_STATUS` |
 | POST | `/api/withdraw/reveal` | `{ session_id, revealed: [{ i, alpha:hex64, beta:hex64 }×N-1] }` | 200 `{ s_j: hex64 }` | 400 `SIGNED_CANDIDATE_REVEALED` / `REVEAL_COUNT` / `REVEAL_DUPLICATE` / `REVEAL_INCOMPLETE` / `CUT_AND_CHOOSE_FAILED` / `SESSION_EXPIRED` |
 | POST | `/api/withdraw/cancel` | `{ session_id }` | 200 `{ refunded, new_balance }` | 400 `NOT_CANCELLABLE`；404 `SESSION_NOT_FOUND` |

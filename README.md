@@ -190,7 +190,7 @@ BC_DEMO_N=10 npm run dev
 | 校验 | express-validator 7.2 | register/login 字段校验 |
 | 前端框架 | React 19 + Vite 8 | 现代构建、HMR |
 | UI 库 | antd 6 | Steps / InputNumber / Alert / Menu |
-| 样式 | Tailwind CSS | 工具类优先 |
+| 样式 | antd ConfigProvider theme token + 原生 CSS | 主题统一、零额外依赖 |
 | Polyfill | vite-plugin-node-polyfills | Buffer / process 浏览器兜底 |
 | 测试 | vitest 4.1 + happy-dom + supertest | 单元 + 集成 + 客户端构建 |
 | 编排 | concurrently 9.1 | 同时启动前后端 dev |

@@ -70,9 +70,11 @@ BC_DEMO_N=10 npm run dev
 
 | 用户名 | 密码 | 角色 | 用途 |
 |--------|------|------|------|
-| alice | pw123 | customer | 付款人取款演示 |
-| bob | pw123 | merchant | 收款人兑付演示 |
-| carol | pw123 | merchant | 双商户并发双花演示 |
+| alice | Pw12345! | customer | 付款人取款演示 |
+| bob | Pw12345! | merchant | 收款人兑付演示 |
+| carol | Pw12345! | merchant | 双商户并发双花演示 |
+
+> 密码须满足校验规则：≥8 位且含字母 + 数字 + 特殊字符。
 
 ---
 
@@ -290,7 +292,7 @@ BC_DEMO_N=10 npm run dev
 ### 7.1 视觉规范
 
 - **antd 6** 设计系统：统一间距、圆角、字体、按钮样式
-- **Tailwind CSS** 工具类：辅助自定义布局
+- **原生 CSS / antd token**：自定义布局与主题微调（`index.css` + ConfigProvider theme token）
 - **role-gated 菜单**：customer 主菜单只见"取款"，merchant 主菜单只见"收款"，避免误操作
 - **状态色规范**：绿色 ✓ 成功、红色 ✗ 错误、橙色 ⏳ 倒计时
 

@@ -151,7 +151,7 @@ $$
 
 2. **浏览器标签页 1：customer 注册 + 取款**
    - 打开 http://localhost:5174/register
-   - 用户名 `alice`，密码 `pw123`，角色选 customer，注册
+   - 用户名 `alice`，密码 `Pw12345!`，角色选 customer，注册
    - 自动跳转 /login，登录后跳 /dashboard，应见 balance=100
    - 点击 "取款" 进入 /withdraw
    - 输入金额 30，点击"开始取款" → 步骤 1/4：POST /api/withdraw/init 成功
@@ -165,7 +165,7 @@ $$
 
 3. **浏览器标签页 2：商户收款**
    - 打开 http://localhost:5174/register
-   - 用户名 `bob`，密码 `pw123`，角色选 merchant，注册 → 登录
+   - 用户名 `bob`，密码 `Pw12345!`，角色选 merchant，注册 → 登录
    - 点击"收款"进入 /payment
    - 粘贴 token JSON 到 TextArea
    - 300ms debounce 后预验签徽章显示 ✓ 通过 + 4 字段预览

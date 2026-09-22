@@ -17,12 +17,12 @@
 | | 4-move 协议银行侧（init/submit/reveal） | `withdrawalService` | `withdrawal.test.js`（19 用例） |
 | | Cut-and-choose 验证 + pickRandomJ | `cutAndChoose.verifyRevealed` | `cutAndChoose.test.js`（18 用例） |
 | | 双花检测（serial + token_hash） | `paymentService.processPayment` | `payment.test.js`（13 用例） |
-| **付款人** | 注册 + 登录 + 初始余额 100 | `/api/auth/register` | `auth.test.js` + `integration.test.js` |
+| **付款人** | 注册 + 登录 + 初始余额 100 | `/api/auth/register` | `integration.test.js`（+ `payment.test.js` 余额用例） |
 | | 取款 4-step 向导 | `Withdraw.jsx` + `/api/withdraw/*` | `withdrawal.test.js` |
 | | α/β 内存隔离 + beforeunload 守卫 | `Withdraw.jsx` useRef | `withdrawal.test.js` 必测#1 |
 | | 4-move 协议用户侧（blinding + unblind） | `blinding.js` | `blinding.test.js`（9 用例） |
 | | TTL 倒计时 + cancel 流程 | `Withdraw.jsx` | `withdrawal.test.js` 必测#3 |
-| **收款人** | 注册 + 登录 | `/api/auth/register`（角色互斥） | `auth.test.js` |
+| **收款人** | 注册 + 登录 | `/api/auth/register`（角色互斥） | `integration.test.js` |
 | | 收款页（粘贴 + 预验签 + 提交） | `Payment.jsx` + `/api/payment` | `payment.test.js` |
 | | 预验签（client verifySig） | `schnorrBlindClient.verifySig` | `clientBuild.test.js`（4 用例） |
 | | 双花 409 演示 | `Payment.jsx` "再次提交"按钮 | `payment.test.js` H3 |
@@ -200,7 +200,7 @@
 
 ### 约束
 - 后端：Node.js 24 + Express + better-sqlite3（WAL 模式）
-- 前端：React 19 + Vite 8 + antd 6 + Tailwind
+- 前端：React 19 + Vite 8 + antd 6
 - 密码学：@noble/secp256k1 + @noble/hashes（secp256k1 曲线）
 - 端口：backend 4100 / frontend 5174（与 cryptobank 项目并行不冲突）
 

@@ -18,6 +18,8 @@
 | **M7** | 集成测试 + 文档 | `integration.test.js`（10 用例：E2E + 跨用户 + 并发双花 + 过期懒清理 + 配置 sanity）、`clientBuild.test.js` 注释澄清、docs 四件套、ISOLATION.md 补证据 | b6fc0c7 | 10（累计 104） |
 
 > 详见各 commit 的 git show。所有里程碑落地前均满足：后端测试全绿、`vite build` 0 errors、`oxlint` 0 warnings。
+>
+> **测试归属说明**：M1 身份层没有独立测试文件，注册/登录的协议级覆盖现由 `integration.test.js`（10 用例）与 `payment.test.js`（2 个注册用例）承担；M2 的 50 个用例对应 `schnorrBlind`(19) + `blinding`(9) + `cutAndChoose`(18) + `clientBuild`(4)。累计 104 = 19+9+18+4+12+19+13+10。
 
 ---
 
@@ -140,7 +142,7 @@
 
 ### 2.9 clientBuild.test.js spawn shell:true 保留（教授风险 #5）
 
-**背景**：`backend/tests/clientBuild.test.js` 通过 `child_process.spawn('npx', ['--prefix', '../frontend', 'build'], { shell: true })` 调用 vite build 验证前端构建产物。Node 24 在 Windows 上对 `shell: true` 触发 DeprecationWarning。
+**背景**：`backend/tests/clientBuild.test.js` 通过 `child_process.spawn('npx', ['vite', 'build'], { cwd: FRONTEND_DIR, shell: true })` 调用 vite build 验证前端构建产物。Node 24 在 Windows 上对 `shell: true` 触发 DeprecationWarning。
 
 **决策**：保留 `shell: true`，添加 18 行注释说明理由。
 
@@ -216,7 +218,9 @@ blindcash/
 │   │   │   │   └── cutAndChoose.js  # verifyRevealed + pickRandomJ
 │   │   │   └── client/               # 浏览器可跑子集（vite build 验证）
 │   │   │       ├── blinding.js       # generateBlinders / computeBlindedCommitment / unblindResponse
-│   │   │       └── schnorrBlindClient.js  # userComputeChallenge + verifySig（预验签）
+│   │   │       ├── schnorrBlindClient.js  # userComputeChallenge + verifySig（预验签）
+│   │   │       ├── pointFormat.js    # 33B 压缩点格式校验
+│   │   │       └── protocolConstants.js   # TOKEN_DOMAIN_TAG（零 Node 依赖）
 │   │   ├── models/
 │   │   │   ├── db.js                 # queryOne / runWrite / runImmediateTx
 │   │   │   ├── initDb.js            # 命令行初始化
@@ -233,13 +237,15 @@ blindcash/
 │   │   │   └── paymentService.js    # formatGate + computeTokenHash + processPayment
 │   │   ├── utils/
 │   │   │   ├── hex.js
-│   │   │   └── jwt.js
+│   │   │   └── pointEncoding.js
 │   │   └── middleware/
-│   │       └── auth.js              # requireAuth + requireRole
+│   │       ├── auth.js              # requireAuth（JWT 解析）
+│   │       └── requireRole.js       # requireRole('customer'|'merchant')
 │   └── tests/
 │       ├── setup.js                 # bytesToHex / hexToBytes / randomBytes
-│       ├── auth.test.js             # 13 用例（M1）
-│       ├── crypto.test.js           # 50 用例（M2 含 1000-trial 盲性证据）
+│       ├── schnorrBlind.test.js     # 19 用例（M2）
+│       ├── blinding.test.js         # 9 用例（M2）
+│       ├── cutAndChoose.test.js     # 18 用例（M2 含 1000-trial 盲性证据）
 │       ├── bankKeyService.test.js   # 12 用例（M3）
 │       ├── withdrawal.test.js       # 19 用例（M4）
 │       ├── payment.test.js          # 13 用例（M5）
@@ -275,7 +281,7 @@ blindcash/
 
 - Chaum, D. (1982). *Blind Signatures for Untraceable Payments*. CRYPTO.
 - Schnorr, C.-P. (1989). *Efficient Identification and Signatures for Smart Cards*. CRYPTO.
-- RFC 6979 — HMAC-based deterministic nonce generation（`deriveNonce` 参考）
+- RFC 6979 — HMAC-based deterministic nonce generation（概念参考；本系统 k_i 用 CSPRNG 独立随机生成）
 - BIP-340 — Schnorr signatures over secp256k1（域分离 tag 设计参考）
 - @noble/curves 文档 — https://paulmillr.com/noble/（浏览器可跑、常数时间算术）
 - SQLite WAL 模式文档 — https://sqlite.org/wal.html
