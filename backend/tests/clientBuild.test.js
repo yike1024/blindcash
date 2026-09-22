@@ -33,6 +33,21 @@ function runViteBuild() {
   return new Promise((resolve) => {
     // Use npx so we don't depend on a specific vite binary path; on Windows
     // npx lives at node_modules/.bin/npx.cmd, which spawn finds via PATH.
+    //
+    // NOTE (教授 M6.md 风险 #5 / M7 评估): Node 24 emits a DeprecationWarning
+    // "Passing args to a child process with shell option true can lead to
+    // security vulnerabilities" when `shell: true` is used with args. We
+    // INTENTIONALLY keep `shell: true` here because:
+    //   (a) On Windows, `npx` is a `.cmd` shim and Node's spawn() cannot exec
+    //       .cmd files directly without a shell — `shell: false` throws
+    //       EINVAL (we verified this the hard way in M7).
+    //   (b) The args array here is hardcoded (no untrusted user input), so
+    //       the shell-injection vector the warning worries about doesn't apply.
+    //   (c) The warning is non-blocking and goes to stderr; it doesn't fail
+    //       the test. CI noise only.
+    // Switching to `execFile` + explicit `cmd.exe /c` would silence the
+    // warning but is the same shell exec under a different name — not a
+    // meaningful security improvement. Accept the warning as-is.
     const child = spawn('npx', ['vite', 'build'], {
       cwd: FRONTEND_DIR,
       shell: true,             // required on Windows to find .cmd shims
