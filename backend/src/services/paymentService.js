@@ -33,11 +33,12 @@
 
 import { createHash } from 'node:crypto';
 import { runImmediateTx } from '../models/db.js';
-import { getPublicKey } from './bankKeyService.js';
+import { getActivePublicKey, getPublicKeyByVersion } from './bankKeyService.js';
 import { verifySig } from '../crypto/server/schnorrBlind.js';
 import { n, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { hexToBytes } from '../utils/hex.js';
 import { recordTransaction } from './transactionService.js';
+import { assertInvariant } from './bankReserveService.js';
 
 /**
  * Error carrying an HTTP status. Routes catch this and map to res.status().
@@ -166,11 +167,14 @@ function computeTokenHash(serialBytes, rPrimeBytes, sPrimeBytes) {
  * (token is consumed on first successful deposit). Network retry UX is a
  * frontend concern (M6).
  *
- * @param {{merchant_id:number, serial:string, amount:number, R_prime:string, s_prime:string}} args
+ * @param {{merchant_id:number, serial:string, amount:number, R_prime:string, s_prime:string, key_id?:number}} args
+ *   args.key_id — optional, token v2 schema field. Phase 3 多密钥轮换时
+ *     用来查对应版本的公钥验签；Phase 1 单密钥时 getPublicKeyByVersion(v)
+ *     始终返回同一把。缺省时走 getActivePublicKey()（前向兼容老 token）。
  * @returns {{deposited:number, new_balance:number}}
  * @throws {PaymentError} 400 MALFORMED_TOKEN / 400 SIGNATURE_INVALID / 409 DOUBLE_SPEND
  */
-export function processPayment({ merchant_id, serial, amount, R_prime, s_prime }) {
+export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, key_id }) {
   // 1. Format gate (H1): reject malformed before curve operations.
   const { serialBytes, RPrimeBytes, sPrimeBytes, sPrime } = formatGate({
     serial,
@@ -190,7 +194,15 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime }
   //    readability (a legitimate merchant hitting a 400 wants to know which
   //    check failed). This is not an oracle: the attacker already knows
   //    whether they constructed a well-formed token.
-  const publicKey = getPublicKey();
+  //
+  //    Phase 1 (v5 §三 checklist #3 N4 修正)：service 层用
+  //    `getPublicKeyByVersion(key_id)` 而不是重载 `getPublicKey(key_id?)`。
+  //    key_id 缺省（旧 token 或 redeem 路由未传）时 fallback 到
+  //    getActivePublicKey()——Phase 1 两个函数返回同一把 key，Phase 3
+  //    多密钥轮换后才会真正分流。
+  const publicKey = (key_id != null)
+    ? getPublicKeyByVersion(key_id)
+    : getActivePublicKey();
   const ok = verifySig(RPrimeBytes, sPrime, serialBytes, amount, publicKey);
   if (!ok) {
     throw new PaymentError(400, 'SIGNATURE_INVALID',
@@ -263,6 +275,20 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime }
       session_id: null,
       note: '收款',
     });
+
+    // Phase 1 (v5 §三 1.3)：total_redeemed += amount，与商户收款在同一
+    // BEGIN IMMEDIATE 内。语义上 total_redeemed = "所有 token 兑付总量"
+    // （包括商户收款和用户退币——电子货币一旦兑付就退出流通）。
+    db.prepare(
+      `UPDATE bank_reserve
+          SET total_redeemed = total_redeemed + ?,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`
+    ).run(amount);
+
+    // assertInvariant 在事务内调用——失败时整个 BEGIN IMMEDIATE 回滚，
+    // 不会出现 spent_coins 插了但 total_redeemed 没加的半状态。
+    assertInvariant(db);
 
     const row = db.prepare(
       `SELECT balance FROM users WHERE id = ?`,

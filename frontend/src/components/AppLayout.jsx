@@ -29,6 +29,7 @@ export default function AppLayout() {
 
   const navItems = [
     { to: '/dashboard', label: '仪表盘' },
+    { to: '/bank', label: '银行' },
     { to: '/withdraw', label: '取款' },
     { to: '/payment', label: '收款' },
     { to: '/history', label: '历史' },

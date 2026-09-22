@@ -133,9 +133,51 @@ export function getOrGenerate() {
 /**
  * Get the bank public key (33-byte compressed P = x·G).
  * Routes layer uses this to serve GET /api/bank/pubkey.
+ *
+ * **Phase 1 (v5 §二 H2 N4)**：保留为 backward-compat alias。新代码应
+ * 直接调 `getActivePublicKey()` 或 `getPublicKeyByVersion(v)`，让意图
+ * 显式——Phase 3 多密钥轮换时不用改调用方。
  * @returns {Uint8Array} 33 bytes
  */
 export function getPublicKey() {
+  if (!_cache) getOrGenerate();
+  return _cache.publicKey;
+}
+
+/**
+ * Get the ACTIVE bank public key (33-byte compressed P = x·G).
+ *
+ * **v5 §二 H2 N4 修正**：JS 无类型，`getPublicKey(key_id?)` 重载会让
+ * `getPublicKey(undefined)` 走哪条不清楚。拆成两个函数避免语义含糊：
+ *   - `getActivePublicKey()` — 当前 status='active' 的密钥（用于签发新 token）
+ *   - `getPublicKeyByVersion(v)` — 按 key_version 查历史公钥（用于验签旧 token）
+ *
+ * Phase 1 单密钥阶段两个函数返回同一个 key（key_version=1, status=active）。
+ * Phase 3 加多密钥轮换时，本函数查 `bank_keys WHERE status='active'`。
+ *
+ * 调用方：routes/bank.js GET /api/bank/pubkey / withdrawalService 取签发密钥。
+ * @returns {Uint8Array} 33 bytes
+ */
+export function getActivePublicKey() {
+  if (!_cache) getOrGenerate();
+  return _cache.publicKey;
+}
+
+/**
+ * Get a historical bank public key by key_version. Used by paymentService
+ * to verify old tokens signed before a key rotation.
+ *
+ * Phase 1 (single key): always returns the same key regardless of v.
+ * Phase 3 (multi-key rotation): query `bank_keys WHERE key_version = v`.
+ *
+ * @param {number} v — key_version (token.key_id ≡ key_version, see H2 注释)
+ * @returns {Uint8Array} 33 bytes
+ * @throws {Error} if v is not a known key_version (Phase 3 will enforce;
+ *         Phase 1 accepts any v since only one key exists)
+ */
+export function getPublicKeyByVersion(v) {
+  // Phase 1: ignore v, always return the single key. Phase 3 will validate
+  // v ∈ {known key_versions} and lookup from bank_keys multi-row table.
   if (!_cache) getOrGenerate();
   return _cache.publicKey;
 }

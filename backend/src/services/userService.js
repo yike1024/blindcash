@@ -8,20 +8,25 @@
 // update-role endpoint).
 //
 // M5 addition: registering as a 'customer' initializes balance to
-// INITIAL_BALANCE_CUSTOMER (100, 教学用 — see professor's M5 design decision
-// #2 "初始余额机制"). Without this, M5 /payment has no money to spend and
-// M6 E2E is dead in the water. ISOLATION.md §一 explicitly notes this is the
-// ONLY balance initialization path — merchant.balance stays 0 until the first
-// successful /payment deposits to it.
+// INITIAL_BALANCE_CUSTOMER. v5 Phase 1 (1.5 开户改革)：改为 0，新用户必须
+// 先充值才能取款——模拟真实 eCash 的"法币入账 → 电子币出账"流程，
+// 不再教学性赠送 100 BC。测试改造用 fundUser(id, amount) helper 充值。
+//
+// ISOLATION.md §一 explicitly notes balance initialization path:
+// Phase 1 后新用户 balance=0，必须 POST /api/bank/deposit 充值才能取款。
+// merchant.balance 仍是 0 直到第一笔成功 /payment 收款。
 
 import { getDb, queryOne } from '../models/db.js';
 
 /**
- * Initial balance credited to new customers on registration (教学用).
- * Production eCash would require a fiat on-ramp; for the course demo we just
- * gift 100 so the withdrawal flow can run end-to-end without a top-up step.
+ * Initial balance credited to new customers on registration.
+ *
+ * v5 Phase 1 (1.5 开户改革)：改为 0。原 100 BC 教学赠送模式不符合
+ * 真实 eCash 货币经济学（用户必须有法币入账才能换电子币）。新用户
+ * 注册后 balance=0，前端 Dashboard 显示"充值"CTA 引导用户去 /bank。
+ * 测试用 fundUser(id, amount) helper（调 bankService.deposit）充值。
  */
-export const INITIAL_BALANCE_CUSTOMER = 100;
+export const INITIAL_BALANCE_CUSTOMER = 0;
 
 /**
  * Create a new user (INSERT into users).

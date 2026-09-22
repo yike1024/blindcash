@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb, runWrite } from '../src/models/db.js';
+import { initSchema, getDb, closeDb } from '../src/models/db.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
 import { bytesToHex, hexToBytes } from '../src/utils/hex.js';
@@ -24,6 +24,7 @@ import { modN } from '../src/crypto/server/curve.js';
 import { TOKEN_DOMAIN_TAG } from '../src/config/bank.js';
 import { createUser } from '../src/services/userService.js';
 import { hashPassword, generateToken } from '../src/services/authService.js';
+import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-m7-transactions.db');
@@ -63,9 +64,9 @@ function hexToScalarFixed(hex) {
   for (let i = 0; i < hex.length; i++) v = (v << 4n) | BigInt(parseInt(hex[i], 16));
   return v;
 }
-function setBalance(userId, balance) {
-  runWrite('UPDATE users SET balance = ? WHERE id = ?', [balance, userId]);
-}
+// Phase 1: setBalance removed — direct UPDATE users.balance without updating
+// bank_reserve breaks assertInvariant. Use fundUser(id, amount) for normal
+// funding; resetBalancesAndReserve(db) in beforeEach resets all balances to 0.
 
 function clientBuildCandidates(RHexList, amount, publicKeyHex) {
   const publicKey = hexToBytes(publicKeyHex);
@@ -144,6 +145,8 @@ beforeAll(async () => {
   db.exec('DELETE FROM transactions;');
   db.exec('DELETE FROM users;');
   db.exec('DELETE FROM bank_keys;');
+  // Phase 1: also reset bank_reserve singleton to 0.
+  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   const cHash = await hashPassword(CUSTOMER.password);
   const cUser = createUser(CUSTOMER.username, cHash, CUSTOMER.role);
@@ -157,12 +160,16 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  // Phase 1: resetBalancesAndReserve clears protocol tables + all balances
+  // to 0 + bank_reserve singleton. Then fundUser properly deposits 100 BC
+  // into the customer. Merchant is NOT funded here — funding the merchant
+  // would add a 'deposit' row that interferes with the deposit-stream
+  // assertions in "收款成功后 transactions 表有一条 deposit 流水". Tests
+  // that need merchant balance (5.2 merchant 也能取款, 5.3 完整转账闭环)
+  // fund the merchant explicitly inside the test body.
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  setBalance(customerId, 100);
-  setBalance(merchantId, 100); // M7: merchant 也能取款，给余额
+  resetBalancesAndReserve(db);
+  fundUser(customerId, 100);
 });
 
 afterAll(async () => {
@@ -180,8 +187,12 @@ describe('M7: withdraw 写流水', () => {
     const { session_id } = await mintToken(customerToken, 30);
 
     const db = getDb();
+    // Phase 1: filter to only 'withdraw' rows — fundUser(customerId, 100)
+    // in beforeEach also adds a 'deposit' row (counterparty='bank') that
+    // is NOT a withdraw, so unfiltered rows.length would be 2.
     const rows = db.prepare(
-      `SELECT kind, amount, counterparty, session_id, note FROM transactions WHERE user_id = ?`,
+      `SELECT kind, amount, counterparty, session_id, note FROM transactions
+       WHERE user_id = ? AND kind = 'withdraw'`,
     ).all(customerId);
     expect(rows.length).toBe(1);
     expect(rows[0].kind).toBe('withdraw');
@@ -206,16 +217,18 @@ describe('M7: deposit 写流水', () => {
     expect(res.status).toBe(200);
 
     const db = getDb();
+    // Phase 1: filter to only 'deposit' rows with counterparty IS NULL —
+    // these are /api/payment deposits (Chaum 匿名). The fundUser deposit
+    // (if any) has counterparty='bank' and is excluded.
     const rows = db.prepare(
-      `SELECT kind, amount, counterparty, serial, note FROM transactions WHERE user_id = ?`,
+      `SELECT kind, amount, counterparty, serial, note FROM transactions
+       WHERE user_id = ? AND kind = 'deposit' AND counterparty IS NULL`,
     ).all(merchantId);
-    // merchant 应该有 1 条 deposit 流水（取款是 customer 的）
-    const deposits = rows.filter((r) => r.kind === 'deposit');
-    expect(deposits.length).toBe(1);
-    expect(deposits[0].amount).toBe(30);
-    expect(deposits[0].counterparty).toBeNull(); // Chaum 匿名
-    expect(deposits[0].serial).not.toBeNull();   // serial 非空
-    expect(deposits[0].note).toBe('收款');
+    expect(rows.length).toBe(1);
+    expect(rows[0].amount).toBe(30);
+    expect(rows[0].counterparty).toBeNull(); // Chaum 匿名
+    expect(rows[0].serial).not.toBeNull();   // serial 非空
+    expect(rows[0].note).toBe('收款');
   });
 });
 
@@ -234,8 +247,11 @@ describe('M7: refund 写流水', () => {
     expect(cancel.status).toBe(200);
 
     const db = getDb();
+    // Phase 1: filter to only 'refund' rows — fundUser(customerId, 100) in
+    // beforeEach also adds a 'deposit' row that is NOT a refund.
     const rows = db.prepare(
-      `SELECT kind, amount, counterparty, session_id, note FROM transactions WHERE user_id = ?`,
+      `SELECT kind, amount, counterparty, session_id, note FROM transactions
+       WHERE user_id = ? AND kind = 'refund'`,
     ).all(customerId);
     expect(rows.length).toBe(1);
     expect(rows[0].kind).toBe('refund');
@@ -294,6 +310,10 @@ describe('M7: 角色解锁闭环', () => {
   });
 
   it('merchant 也能取款（角色锁已解锁）', async () => {
+    // Phase 1: merchant not funded in beforeEach (would add 'deposit' row
+    // interfering with deposit-stream assertions). Fund explicitly here so
+    // merchant has balance=100 to withdraw 30 → 70.
+    fundUser(merchantId, 100);
     // merchant 取款 30 → 余额 100→70
     const res = await mintToken(merchantToken, 30);
     expect(res.token.amount).toBe(30);
@@ -310,6 +330,10 @@ describe('M7: 角色解锁闭环', () => {
   });
 
   it('完整转账闭环：customer 取款 → merchant 收款 → merchant 取款 → customer 收款', async () => {
+    // Phase 1: merchant not funded in beforeEach. Fund explicitly here so
+    // merchant starts at 100 — needed for step 3 (withdraw 40 after receiving
+    // 30 → 130→90) and for the assertions against new_balance below.
+    fundUser(merchantId, 100);
     // 1. customer 取款 30（100→70）
     const { token } = await mintToken(customerToken, 30);
     // 2. merchant 收款 30（100→130）

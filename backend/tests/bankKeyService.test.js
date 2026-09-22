@@ -24,6 +24,8 @@ import {
   getOrGenerate,
   getPublicKey,
   getPrivateKey,
+  getActivePublicKey,
+  getPublicKeyByVersion,
   _resetCacheForTest,
 } from '../src/services/bankKeyService.js';
 import { initSchema, getDb, closeDb, queryOne } from '../src/models/db.js';
@@ -153,6 +155,40 @@ describe('M3 · bankKeyService — keypair persistence (singleton row id=1)', ()
     it('getPrivateKey() returns the same 32B as getOrGenerate().privateKey', () => {
       const kp = getOrGenerate();
       expect(getPrivateKey()).toStrictEqual(kp.privateKey);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 1 (v5 §二 H2 N4): multi-key rotation API stubs.
+  // Phase 1 has a single bank key (key_version=1, status='active'), so
+  // getActivePublicKey() and getPublicKeyByVersion(v) both return that same
+  // key regardless of v. Phase 3 will add multi-key lookup + validation.
+  // ────────────────────────────────────────────────────────────────────
+  describe('Phase 1: multi-key rotation API stubs (single key)', () => {
+    it('getActivePublicKey() returns the same 33B as getPublicKey()', () => {
+      const kp = getOrGenerate();
+      const active = getActivePublicKey();
+      expect(active).toBeInstanceOf(Uint8Array);
+      expect(active.length).toBe(33);
+      expect(active).toStrictEqual(kp.publicKey);
+      expect(active).toStrictEqual(getPublicKey());
+    });
+
+    it('getPublicKeyByVersion(1) returns the same key (Phase 1 single key)', () => {
+      const kp = getOrGenerate();
+      const byV1 = getPublicKeyByVersion(1);
+      expect(byV1).toBeInstanceOf(Uint8Array);
+      expect(byV1.length).toBe(33);
+      expect(byV1).toStrictEqual(kp.publicKey);
+    });
+
+    it('getPublicKeyByVersion(999) returns the same key (Phase 1 ignores v)', () => {
+      // Phase 1 has only one key, so any version arg resolves to that key.
+      // Phase 3 will enforce v ∈ {known key_versions} and throw on unknown.
+      const kp = getOrGenerate();
+      const byV999 = getPublicKeyByVersion(999);
+      expect(byV999).toStrictEqual(kp.publicKey);
+      expect(byV999).toStrictEqual(getActivePublicKey());
     });
   });
 });

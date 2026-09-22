@@ -29,13 +29,14 @@ import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb, runWrite } from '../src/models/db.js';
+import { initSchema, getDb, closeDb } from '../src/models/db.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { verifySig } from '../src/crypto/server/schnorrBlind.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
 import { bytesToHex, hexToBytes } from '../src/utils/hex.js';
 import { modN } from '../src/crypto/server/curve.js';
 import { TOKEN_DOMAIN_TAG, SESSION_TTL_MS } from '../src/config/bank.js';
+import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-m7-integration.db');
@@ -73,9 +74,9 @@ function hexToScalarFixed(hex) {
   return v;
 }
 
-function setBalance(userId, balance) {
-  runWrite('UPDATE users SET balance = ? WHERE id = ?', [balance, userId]);
-}
+// Phase 1: setBalance removed — direct UPDATE users.balance without
+// updating bank_reserve breaks assertInvariant. Use fundUser(id, amount)
+// for normal funding; resetBalancesAndReserve(db) resets all balances to 0.
 
 function expireSession(sessionId) {
   const db = getDb();
@@ -176,9 +177,13 @@ beforeAll(async () => {
   db.exec('DELETE FROM transactions;');
   db.exec('DELETE FROM users;');
   db.exec('DELETE FROM bank_keys;');
+  // Phase 1: also reset bank_reserve singleton to 0.
+  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   // Register users via real HTTP /api/auth/register (exercises full stack:
   // express-validator + bcrypt + JWT + role + initial-balance mechanism).
+  // Phase 1 (v5 §三 1.5 开户改革): new customers register with balance=0
+  // (was 100). Must fund via /api/bank/deposit before withdrawing.
   const r1 = await api('/api/auth/register', {
     method: 'POST',
     body: { username: 'alice', password: 'Passw0rd!extra', role: 'customer' },
@@ -186,7 +191,9 @@ beforeAll(async () => {
   expect(r1.status).toBe(201);
   customerToken = r1.body.token;
   customerId = r1.body.user.id;
-  expect(r1.body.user.balance).toBe(100); // M5 initial balance
+  expect(r1.body.user.balance).toBe(0); // Phase 1: was 100, now 0
+  // Fund the customer via the deposit service so they can withdraw.
+  fundUser(customerId, 100);
 
   const r2 = await api('/api/auth/register', {
     method: 'POST',
@@ -213,18 +220,19 @@ beforeAll(async () => {
   expect(r4.status).toBe(201);
   customer2Token = r4.body.token;
   customer2Id = r4.body.user.id;
+  // Phase 1: fund customer2 too so cross-user tests that need balance work.
+  fundUser(customer2Id, 100);
 });
 
 beforeEach(() => {
+  // Phase 1: resetBalancesAndReserve clears protocol tables + all balances
+  // to 0 + bank_reserve singleton. Then fundUser properly deposits 100 BC
+  // into each customer (updates reserve + assertInvariant). Merchants stay
+  // at 0 (only /payment credits merchant.balance).
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  // reset balances: customer=100, merchants=0
-  setBalance(customerId, 100);
-  setBalance(customer2Id, 100);
-  setBalance(merchantAId, 0);
-  setBalance(merchantBId, 0);
+  resetBalancesAndReserve(db);
+  fundUser(customerId, 100);
+  fundUser(customer2Id, 100);
 });
 
 afterAll(async () => {
@@ -356,7 +364,8 @@ describe('M7 · cross-user access denied', () => {
 
   it('merchant can call /api/withdraw/init → 201 (M7: 角色锁已解锁)', async () => {
     // M7: 角色锁去掉后，merchant 也能取款，形成真·转账闭环
-    setBalance(merchantAId, 100); // 给 merchant 余额
+    // Phase 1: fund merchant via deposit so they can withdraw.
+    fundUser(merchantAId, 100);
     const init = await api('/api/withdraw/init', {
       method: 'POST', token: merchantAToken, body: { amount: 10 },
     });
@@ -365,7 +374,7 @@ describe('M7 · cross-user access denied', () => {
     await api('/api/withdraw/cancel', {
       method: 'POST', token: merchantAToken, body: { session_id: init.body.session_id },
     });
-    setBalance(merchantAId, 0);
+    // Phase 1: beforeEach will reset on next test, no manual cleanup needed.
   });
 
   it('customer can call /api/payment → 400 SIGNATURE_INVALID (M7: 角色锁已解锁，但 token 无效仍被拒)', async () => {

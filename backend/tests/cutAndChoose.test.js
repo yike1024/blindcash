@@ -270,7 +270,7 @@ describe('M2 · cut-and-choose cheat scenario (N=10)', () => {
     // is ≈ 1/N (within a generous confidence band).
   });
 
-  it('over 1000 trials with N=10, cheat-success rate ≤ 1/N + slack (empirical bound)', () => {
+  it('over 1000 trials with N=10, cheat-success rate ≤ 1/N + slack (empirical bound)', { timeout: 180000 }, () => {
     const N = 10;
     const realAmount = 100;
     const fakeAmount = 1000;

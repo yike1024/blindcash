@@ -253,6 +253,13 @@ export default function WithdrawPage() {
 
       const candJ = candidatesRef.current[jIndex];
       const finalToken = {
+        // Phase 1 (v5 §三 1.7 token v2 schema)：含 v:2 与 key_id 字段。
+        // key_id 来自 reveal 步骤后端返回（revealAndSign 返回
+        // {s_j, key_id:1}）；缺省时 fallback 到 1（Phase 1 单密钥）。
+        // 支付/退币时把 key_id 透传给 processPayment，由它走
+        // getPublicKeyByVersion(key_id) 验签——Phase 3 多密钥轮换铺路。
+        v: 2,
+        key_id: data.key_id ?? 1,
         serial: candJ.serial,
         amount: session.amount,
         R_prime: candJ.R_prime,

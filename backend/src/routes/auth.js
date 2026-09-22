@@ -65,9 +65,15 @@ router.post(
       // Issue JWT immediately so the front-end is authenticated
       const token = generateToken(user);
 
+      // Phase 1 (v5 §三 1.5 开户改革)：新用户 balance=0，前端 Dashboard
+      // 显示"请先充值"CTA 引导用户去 /bank。这里在 register 响应里也带
+      // 一个 hint，让客户端无需检查 balance 也能展示充值引导。
       return res.status(201).json({
         user: { id: user.id, username: user.username, role: user.role, balance: user.balance },
         token,
+        hint: user.role === 'customer' && user.balance === 0
+          ? 'account opened with balance=0; please deposit at /api/bank/deposit before withdrawing'
+          : null,
       });
     } catch (e) {
       // Catch any DB-level UNIQUE violation (race condition)

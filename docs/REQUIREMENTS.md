@@ -17,7 +17,7 @@
 | | 4-move 协议银行侧（init/submit/reveal） | `withdrawalService` | `withdrawal.test.js`（19 用例） |
 | | Cut-and-choose 验证 + pickRandomJ | `cutAndChoose.verifyRevealed` | `cutAndChoose.test.js`（18 用例） |
 | | 双花检测（serial + token_hash） | `paymentService.processPayment` | `payment.test.js`（13 用例） |
-| **付款人** | 注册 + 登录 + 初始余额 100 | `/api/auth/register` | `integration.test.js`（+ `payment.test.js` 余额用例） |
+| **付款人**| | 注册 + 登录 + 充值（初始余额 0） | `/api/auth/register` + `/api/bank/deposit` | `integration.test.js` + `bank.test.js`（余额用例） |
 | | 取款 4-step 向导 | `Withdraw.jsx` + `/api/withdraw/*` | `withdrawal.test.js` |
 | | α/β 内存隔离 + beforeunload 守卫 | `Withdraw.jsx` useRef | `withdrawal.test.js` 必测#1 |
 | | 4-move 协议用户侧（blinding + unblind） | `blinding.js` | `blinding.test.js`（9 用例） |
@@ -47,7 +47,7 @@
 
 | 角色 | 权限 | 限制 |
 |---|---|---|
-| **顾客（customer）** | 注册自动获初始余额 100；发起 4-move 取款；取消未完成取款 | 不可收款（`/api/payment` → 403） |
+| **顾客（customer）** | 注册初始余额为 0，需通过 `/bank` 自助充值；发起 4-move 取款；取消未完成取款 | 不可收款（`/api/payment` → 403） |
 | **商户（merchant）** | 接收 token 存款；本地预验签；触发双花演示 | 不可取款（`/api/withdraw/*` → 403）；初始余额 0 |
 | **银行（bank）** | 持签名密钥对 `(x, P)`；4-move 中生成 `R_i` 与 `s_j`；维护 spent_coins | 服务器端进程，无独立 UI |
 | **任何访客** | `GET /api/bank/pubkey` 拿银行公钥 `P` 做公开验签 | 仅此一个公开端点 |
@@ -102,9 +102,9 @@
 |---|---|
 | 参与者 | 顾客 |
 | 前置 | 用户名未被占用 |
-| 主流程 | 输入 username + password + role='customer' → POST `/api/auth/register` → 201 `{ user: { id, username, role, balance: 100 }, token }` |
+| 主流程 | 输入 username + password + role='customer' → POST `/api/auth/register` → 201 `{ user: { id, username, role, balance: 0 }, token }` |
 | 备选 | 用户名已占 → 409 `USERNAME_TAKEN`；密码不合规 → 400 `VALIDATION_ERROR` |
-| 后置 | 顾客 balance=100（M5 `INITIAL_BALANCE_CUSTOMER`） |
+| 后置 | 顾客 balance=0；需通过 `/bank` → POST `/api/bank/deposit` 充值后才能取款 |
 
 ### UC-2：顾客 4-move 取款
 
@@ -162,7 +162,7 @@
 | ID | 需求 | 实现里程碑 |
 |---|---|---|
 | FR-1 | 用户注册/登录，role ∈ {customer, merchant} 不可改 | M1 |
-| FR-2 | 顾客注册自动获初始余额 100 | M5 |
+| FR-2 | 顾客注册初始余额为 0，需通过 `/api/bank/deposit` 自助充值 | M5 + Phase 1 |
 | FR-3 | 银行启动生成并保存签名密钥对 `(x, P)`，单例 row | M3 |
 | FR-4 | 公开端点 `GET /api/bank/pubkey` 返回 33B 压缩 P | M3 |
 | FR-5 | Schnorr 盲签 4-move 协议：init / submit / reveal / cancel | M2 + M4 |
@@ -176,6 +176,8 @@
 | FR-13 | 顾客取款向导（4-step + α/β 内存 + TTL 倒计时 + cancel + 复制 token）| M6 step1 |
 | FR-14 | 商户收款页（粘贴 token → 本地预验签 ✓ → 提交 → 双花 409 演示）| M6 step2 |
 | FR-15 | 端到端集成测试覆盖 E2E + 跨用户 + 跨商户并发双花 + 过期懒清理 | M7 step1 |
+
+> **Phase 1：自助充值（simulated fiat rail）**：用户通过 `POST /api/bank/deposit` 自助充值 BC，模拟外部法币入账。单次上限 1000 BC，24h 滚动累计上限 5000 BC。新用户注册时余额为 0，必须先充值才能取款。对应的 `POST /api/bank/redeem` 允许用户将自有 BC 退回银行。所有余额/储备变更后均调用 `assertInvariant` 校验。
 
 ---
 
@@ -203,6 +205,7 @@
 - 前端：React 19 + Vite 8 + antd 6
 - 密码学：@noble/secp256k1 + @noble/hashes（secp256k1 曲线）
 - 端口：backend 4100 / frontend 5174（与 cryptobank 项目并行不冲突）
+- **bank_reserve 不变量**（Phase 1）：新增 `bank_reserve` 表跟踪全局储备，不变式为 `reserve_balance == SUM(users.balance) + (total_issued - total_redeemed) + in-flight sessions`。`assertInvariant` 在所有余额/储备变更后调用（init/submit/reveal/cancel/expire/deposit/redeem/payment），违反时回滚事务。
 
 ### 假设
 1. 银行签名密钥不泄露（密钥管理是独立维度，ISOLATION §五）

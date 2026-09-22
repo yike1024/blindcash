@@ -1,13 +1,13 @@
 # BlindCash 测试文档（TESTING）
 
-> 内容：104 用例分类表 + 盲性证据 + 双花演示 + 测试环境
+> 内容：146 用例分类表 + 盲性证据 + 双花演示 + 测试环境
 > 关联：[REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN.md](./DESIGN.md) | [IMPLEMENTATION.md](./IMPLEMENTATION.md) | [ISOLATION.md](../ISOLATION.md)
 
 ---
 
-## 1. 测试用例分类总表（104 例）
+## 1. 测试用例分类总表（146 例）
 
-> 8 个测试文件，共 104 个 `it` / `test` 用例。M7 阶段一新增 10 个集成测试，使总数从 M5 的 94 增至 104。
+> 10 个测试文件，共 146 个 `it` / `test` 用例。Phase 1 新增 `bank.test.js`（19）+ `bankReserveService.test.js`（7）并扩充原有文件，使总数从 M7 的 104 增至 146。
 
 ### 1.1 按里程碑与文件分布
 
@@ -21,7 +21,9 @@
 | `withdrawal.test.js` | M4 | 19 | 4-move happy path + 校验 + **教授 3 必测**（α/β 不离开设备、session 唯一性、过期懒清理）+ cancel |
 | `payment.test.js` | M5 | 13 | happy path + H3 双花 vs 重试 + H1 畸形 token + 篡改金额 + 角色守卫 + 初始余额 |
 | `integration.test.js` | M7 | 10 | 全栈 E2E + 跨用户拒绝 + 并发双花 + 过期懒清理 + 配置 sanity |
-| **合计** | | **104** | |
+| `bank.test.js` | Phase 1 | 19 | deposit service + `/api/bank/deposit` + `/api/bank/redeem` 路由 |
+| `bankReserveService.test.js` | Phase 1 | 7 | assertInvariant 正常 / 破坏 / 回滚 / in-flight |
+| **合计** | | **146** | |
 
 ### 1.2 按测试类型分布
 
@@ -29,7 +31,7 @@
 |------|--------|----------|
 | **正确性（happy path）** | 28 | `correctness: blind → sign → unblind → verify`、`M4 happy path`、`M5 happy path`、`M7 full E2E` |
 | **篡改检测** | 17 | `tampering: any single-byte mutation → verify fails`、`tampered amount → verifySig fails 400` |
-| **不变量验证** | 22 | α/β 不离开设备、session 唯一性、过期懒清理退款、初始余额 100、singleton 密钥一致性 |
+| **不变量验证** | 22 | α/β 不离开设备、session 唯一性、过期懒清理退款、初始余额 0、singleton 密钥一致性 |
 | **盲性证据** | 3 | `R'_j 1000-trial Shannon entropy ≥ 200 bits`、`bank cannot link token to session`、`pickRandomJ 分布均匀` |
 | **作弊概率** | 2 | `over 1000 trials with N=10, cheat-success rate ≤ [50, 200]/1000`、`single-cheat attempt fails with high probability` |
 | **格式校验（H1）** | 4 | serial 63 hex → 400、R' 前缀 04 → 400、s' 63 hex → 400、amount=0 → 400 |
@@ -137,7 +139,7 @@ $$
 
 ### 3.2 手动 E2E 演示路径
 
-**目标路径**：注册 customer(初始 100) → 取款 30 → 复制 token → 商户粘贴预验签 ✓ → 提交 → 商户余额 +30 → 重试同 token → 409 双花
+**目标路径**：注册 customer(初始 0) → /bank 充值 100 → 取款 30 → 复制 token → 商户粘贴预验签 ✓ → 提交 → 商户余额 +30 → 重试同 token → 409 双花
 
 **操作步骤**：
 
@@ -152,7 +154,8 @@ $$
 2. **浏览器标签页 1：customer 注册 + 取款**
    - 打开 http://localhost:5174/register
    - 用户名 `alice`，密码 `Pw12345!`，角色选 customer，注册
-   - 自动跳转 /login，登录后跳 /dashboard，应见 balance=100
+   - 自动跳转 /login，登录后跳 /dashboard，应见 balance=0
+   - 点击 "充值" 进入 /bank，输入 100 充值，返回 /dashboard 应见 balance=100
    - 点击 "取款" 进入 /withdraw
    - 输入金额 30，点击"开始取款" → 步骤 1/4：POST /api/withdraw/init 成功
    - 步骤 2/4：客户端生成 N=10 对 (α_i, β_i) + R'_i / e_i，POST /api/withdraw/submit
@@ -222,11 +225,12 @@ $$
 - M2 纯密码学测试不触碰 DB，不受隔离机制影响
 - `integration.test.js` 用 `http.createServer(app)` + 随机端口启动真实 HTTP server，避免 supertest 在 Windows 上的 ENOBUFS 端口耗尽问题
 - 概率测试（盲性证据、作弊概率）单独标 `timeout: 60000`，避免 vitest 默认 5s 超时
+- **fundUser 辅助函数**：`fundUser(userId, amount)` 调用 `bankService.deposit` 同时更新 `users.balance` 与 `bank_reserve.reserve_balance`。直接 SQL `setBalance` 已弃用，因其绕过 `assertInvariant` 不变量校验。
 
 ### 4.3 运行命令
 
 ```bash
-# 全量测试（104 用例）
+# 全量测试（146 用例）
 npm test
 
 # 监听模式
@@ -251,9 +255,11 @@ npx vitest run integration.test.js
  ✓ 19 tests passed (withdrawal)
  ✓ 13 tests passed (payment)
  ✓ 10 tests passed (integration)
+ ✓ 19 tests passed (bank)
+ ✓  7 tests passed (bankReserveService)
 
- Test Files  8 passed (8)
-      Tests  104 passed (104)
+ Test Files  10 passed (10)
+      Tests  146 passed (146)
 ```
 
 ### 4.5 已知噪声

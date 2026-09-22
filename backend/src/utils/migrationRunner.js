@@ -139,13 +139,31 @@ export function runMigrations(db, opts = {}) {
     }
 
     const sql = readFileSync(join(migrationsDir, file), 'utf8');
-    const tx = db.transaction(() => {
+
+    // P1 修正（v5 §二 H1 终审）：检测 SQL 文件是否自带 BEGIN/COMMIT 事务
+    // 控制（如 003_users_role_add_admin.sql 用 PRAGMA foreign_keys=OFF + BEGIN
+    // 重建 users 表——这种 SQL 不能再被 db.transaction() 包一层，否则
+    // "cannot start a transaction within a transaction"）。
+    // 自带事务的 SQL 直接 exec（事务由 SQL 自己管），再单独 INSERT 版本记录；
+    // 无事务控制的 SQL 仍走 db.transaction() 包装，保证失败回滚 + 版本不写。
+    const hasExplicitTx = /\bBEGIN\s*(?:TRANSACTION|DEFERRED|IMMEDIATE|EXCLUSIVE)?\s*;/i.test(sql);
+    if (hasExplicitTx) {
+      // SQL 自管事务：db.exec 失败时 SQL 内部 BEGIN 已 ROLLBACK，外层没
+      // 事务可回滚，所以直接 exec 即可。版本记录在另一句 prepare 里独立
+      // 隐式事务执行——exec 抛错就到不了这一行，版本不会被错记。
       db.exec(sql);
       db.prepare(
         `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`
       ).run(version, file.replace(/\.sql$/, ''));
-    });
-    tx();  // 失败自动回滚 + 抛错；app.js catch 后 process.exit(1)
+    } else {
+      const tx = db.transaction(() => {
+        db.exec(sql);
+        db.prepare(
+          `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`
+        ).run(version, file.replace(/\.sql$/, ''));
+      });
+      tx();  // 失败自动回滚 + 抛错；app.js catch 后 process.exit(1)
+    }
     lastApplied = version;
   }
 }

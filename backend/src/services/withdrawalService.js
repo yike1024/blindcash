@@ -20,13 +20,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { queryOne, runWrite, runImmediateTx } from '../models/db.js';
-import { getPublicKey, getPrivateKey } from './bankKeyService.js';
+import { getActivePublicKey, getPrivateKey } from './bankKeyService.js';
 import { bankStep1, bankStep3 } from '../crypto/server/schnorrBlind.js';
 import { verifyRevealed, pickRandomJ } from '../crypto/server/cutAndChoose.js';
 import { randomScalar, scalarToBytes, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '../utils/hex.js';
 import { CUT_AND_CHOOSE_N, SESSION_TTL_MS } from '../config/bank.js';
 import { recordTransaction } from './transactionService.js';
+import { assertInvariant } from './bankReserveService.js';
 
 /**
  * Error carrying an HTTP status. Routes catch this and map to res.status().
@@ -76,6 +77,9 @@ function refundAndClose(db, session, newStatus) {
     session_id: session.id,
     note: `退款 (${newStatus})`,
   });
+  // Phase 1 (v5 §三 1.4)：在途项 -amount，balance +amount，公式两侧同步。
+  // 在调用方事务内调用——失败时整个 BEGIN IMMEDIATE 回滚。
+  assertInvariant(db);
 }
 
 /**
@@ -97,6 +101,13 @@ export function lazyCleanupExpiredSessions(customerId) {
     ).all(customerId, now);
     for (const s of expired) {
       refundAndClose(db, s, 'expired');
+    }
+    // Phase 1 (v5 §三 1.4)：所有 refundAndClose 已各自 assertInvariant，
+    // 但若 expired.length === 0 也要在末尾跑一次——保证调用方拿到的是
+    // 不变量已验证的状态（无遗漏）。条件加 expired.length === 0 是为了
+    // 避免重复跑（每次 refundAndClose 末尾已经 assert 过）。
+    if (expired.length === 0) {
+      assertInvariant(db);
     }
     return expired.length;
   });
@@ -169,6 +180,9 @@ export function initWithdrawal({ customer_id, amount }) {
          (id, customer_id, amount, n_candidates, candidates, status, expires_at)
        VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
     ).run(sessionId, customer_id, amount, N, JSON.stringify(candidates), expiresAt);
+
+    // Phase 1 (v5 §三 1.4)：在途项 +amount，balance -amount，公式两侧同步。
+    assertInvariant(db);
 
     // M6: return ttl_ms so the frontend countdown uses the server's real TTL
     // (single source of truth — BC_SESSION_TTL_MS may override the default).
@@ -247,6 +261,11 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
          SET candidates = ?, j_index = ?, status = 'submitted'
        WHERE id = ?`,
     ).run(JSON.stringify(stored), j, session_id);
+
+    // Phase 1 (v5 §三 1.4 checklist #5)：submit 路径不改 balance/reserve，
+    // 但 status pending → submitted 都在在途项集合内，公式两侧仍同步。
+    // 末尾跑一次 assertInvariant 保证调用方拿到的是已验证状态。
+    assertInvariant(db);
 
     return { j };
   });
@@ -331,7 +350,7 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
     }
 
     const stored = JSON.parse(session.candidates);
-    const publicKey = getPublicKey();
+    const publicKey = getActivePublicKey();
 
     // verify every i ≠ j
     for (const r of revealed) {
@@ -365,6 +384,17 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
       `UPDATE withdrawal_sessions SET status = 'committed' WHERE id = ?`,
     ).run(session_id);
 
+    // Phase 1 (v5 §三 1.4 + 1.7)：在途项 -amount，total_issued +amount，
+    // 公式两侧同步。total_issued 必须与 status='committed' 在同一
+    // BEGIN IMMEDIATE 内，否则中途崩溃会让"已签发但 total_issued 没加"
+    // 的半状态破坏不变量。token v2 落地：返回值带 key_id=1。
+    db.prepare(
+      `UPDATE bank_reserve
+          SET total_issued = total_issued + ?,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`
+    ).run(session.amount);
+
     // M7: 写一笔 withdraw 流水，让用户在 /history 看到取款去向。
     // counterparty = 'bank'（对手方是银行）；serial 留空（token 的 serial
     // 存在 session.candidates[j].serial，但这里不提取，流水层只记金额与方向）。
@@ -378,7 +408,9 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
       note: '取款',
     });
 
-    return { s_j: scalarToHex(sJ) };
+    assertInvariant(db);
+
+    return { s_j: scalarToHex(sJ), key_id: 1 };
   });
 
   if (result.error) throw result.error;

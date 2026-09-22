@@ -35,9 +35,14 @@ function handleError(res, err) {
 }
 
 // POST /api/payment
+//
+// Phase 1 (v5 §三 1.7 token v2)：从 body 取 key_id 透传给 processPayment，
+// 由 service 层用 getPublicKeyByVersion(key_id) 查对应版本公钥验签。
+// Phase 1 单密钥时 key_id 始终是 1；缺省时走 getActivePublicKey()（前向兼容
+// 老 token）。key_id 是可选字段——不传也能验签，只是用 active 密钥。
 router.post('/', depositGuard, (req, res) => {
   try {
-    const { serial, amount, R_prime, s_prime } = req.body || {};
+    const { serial, amount, R_prime, s_prime, key_id } = req.body || {};
     // Field presence check — service layer does the deeper format gate.
     if (serial === undefined || amount === undefined
         || R_prime === undefined || s_prime === undefined) {
@@ -52,6 +57,7 @@ router.post('/', depositGuard, (req, res) => {
       amount,
       R_prime,
       s_prime,
+      key_id,
     });
     return res.json(result);
   } catch (err) {

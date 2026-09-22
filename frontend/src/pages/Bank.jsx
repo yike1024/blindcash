@@ -1,15 +1,22 @@
-// pages/Payment.jsx — 收款（粘贴 token → 本地预验签 → 存款）
+// pages/Bank.jsx — Phase 1: 银行充值/退币双 tab
 //
-// ALL CRYPTO LOGIC, DEBOUNCED PREVIEW, VERIFY-SIG FLOW PRESERVED VERBATIM.
-// M7: 清除教学脚手架文案，角色锁已解锁（任何登录用户都能收款）。
+// v5 §三 1.2 + 1.3 + 1.6:
+//   充值 tab  — 自助充值（simulated fiat rail），POST /api/bank/deposit
+//               单次上限 1000 BC，24h 滚动累计上限 5000 BC
+//   退币 tab  — 粘贴自己取款得到的 token，本地预验签后 POST /api/bank/redeem
+//               redeem = processPayment({merchant_id: 自己, ...token})，
+//               与商户收款共享 spent_coins 表（同一 token 只能兑付一次）
+//
+// Phase 1 (v5 §三 1.5 开户改革)：新用户 balance=0，必须先充值才能取款。
+// Dashboard 在余额=0 时主 CTA 指向本页。
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Input, Alert, Button, Space, Typography, Descriptions, Tag,
-  message, Result, Spin, Collapse,
+  Tabs, Input, InputNumber, Button, Space, Typography, Descriptions, Alert,
+  message, Result, Spin, Tag,
 } from 'antd';
 import {
-  CheckCircleTwoTone, CloseCircleTwoTone, CopyOutlined, ThunderboltOutlined,
+  CheckCircleTwoTone, CloseCircleTwoTone, BankOutlined, ArrowRightOutlined,
 } from '@ant-design/icons';
 
 import { useAuth } from '../context/AuthContext.jsx';
@@ -22,7 +29,10 @@ const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
+const MAX_DEPOSIT_PER_TX = 1000;
+const MAX_DEPOSIT_PER_DAY = 5000;
 
+// ── token format check (shared logic with Payment.jsx, token v2 aware) ──
 function cheapFormatCheck(tok) {
   if (typeof tok.serial !== 'string' || !HEX64_RE.test(tok.serial)) {
     return { ok: false, reason: 'serial 必须是 64 位 hex 字符串' };
@@ -36,10 +46,7 @@ function cheapFormatCheck(tok) {
   if (typeof tok.s_prime !== 'string' || !HEX64_RE.test(tok.s_prime)) {
     return { ok: false, reason: 's_prime 必须是 64 位 hex 字符串' };
   }
-  // Phase 1 (v5 §三 1.7 token v2)：透传 key_id 字段（如有）。
-  // 老 token 没有 key_id → undefined → service 层走 getActivePublicKey()。
-  // 新 token v2 有 key_id=1 → service 层走 getPublicKeyByVersion(1)。
-  // Phase 1 两者返回同一把密钥；Phase 3 多密钥轮换后才会真正分流。
+  // Phase 1 token v2: 透传 key_id（如有）
   const fields = {
     serial: tok.serial,
     amount: tok.amount,
@@ -52,7 +59,7 @@ function cheapFormatCheck(tok) {
   return { ok: true, fields };
 }
 
-function mapApiError(err, fallback = '收款失败') {
+function mapApiError(err, fallback = '操作失败') {
   const code = err?.response?.data?.error;
   const srvMsg = err?.response?.data?.message;
   switch (code) {
@@ -61,26 +68,194 @@ function mapApiError(err, fallback = '收款失败') {
     case 'SIGNATURE_INVALID':
       return '签名验证失败：token 被篡改或解盲错误。';
     case 'DOUBLE_SPEND':
-      return '双花检测：此 token 已被花费过（serial 已在 spent_coins 表中）。';
+      return '双花检测：此 token 已被花费过。';
     case 'VALIDATION_ERROR':
       return `请求参数缺失：${srvMsg ?? ''}`;
-    case 'MERCHANT_NOT_FOUND':
-      return '商户账户不存在（请联系管理员）。';
+    case 'DEPOSIT_LIMIT_EXCEEDED':
+      return `单次充值超限：${srvMsg ?? ''}`;
+    case 'DAILY_LIMIT_EXCEEDED':
+      return `日累计充值超限：${srvMsg ?? ''}`;
+    case 'INSUFFICIENT_BALANCE':
+      return '余额不足。';
     default:
       return fallback;
   }
 }
 
-export default function PaymentPage() {
+export default function BankPage() {
   const { user, updateUser } = useAuth();
+  const [activeTab, setActiveTab] = useState('deposit');
 
+  return (
+    <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
+      {/* ── Page header ── */}
+      <header className="bc-rise-1" style={{ marginBottom: 28 }}>
+        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>
+          <BankOutlined style={{ marginRight: 6 }} />银行
+        </p>
+        <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
+          充值与退币
+        </h1>
+      </header>
+
+      {/* ── Balance strip ── */}
+      <section className="bc-card bc-rise-2" style={{ padding: '24px 28px', marginBottom: 24, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
+        <div>
+          <div className="bc-stat-label" style={{ marginBottom: 8 }}>当前余额</div>
+          <div className="bc-num" style={{ fontSize: 'clamp(34px, 4vw, 44px)', color: 'var(--gold-400)' }}>
+            {user?.balance ?? 0}
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--text-muted)', marginLeft: 8, letterSpacing: '0.1em' }}>BC</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+          <Meta label="角色">
+            <span className="bc-chip bc-chip--gold">{user?.role === 'merchant' ? '商户' : '顾客'}</span>
+          </Meta>
+          <Meta label="用户名">
+            <span className="bc-mono" style={{ fontSize: 14, color: 'var(--paper-100)' }}>@{user?.username}</span>
+          </Meta>
+        </div>
+      </section>
+
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: 'deposit',
+            label: '充值',
+            children: <DepositTab user={user} updateUser={updateUser} />,
+          },
+          {
+            key: 'redeem',
+            label: '退币',
+            children: <RedeemTab user={user} updateUser={updateUser} />,
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
+// ── 充值 Tab ──
+function DepositTab({ updateUser }) {
+  const [amount, setAmount] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const handleSubmit = useCallback(async () => {
+    if (!Number.isInteger(amount) || amount <= 0) {
+      message.warning('请输入正整数金额');
+      return;
+    }
+    if (amount > MAX_DEPOSIT_PER_TX) {
+      message.warning(`单次充值上限 ${MAX_DEPOSIT_PER_TX} BC`);
+      return;
+    }
+    setSubmitting(true);
+    setResult(null);
+    try {
+      const { data } = await api.post('/bank/deposit', { amount });
+      updateUser({ balance: data.new_balance });
+      setResult({
+        kind: 'success',
+        msg: `已充值 ${data.deposited} BC`,
+        deposited: data.deposited,
+        new_balance: data.new_balance,
+      });
+      message.success(`充值成功：+${data.deposited} BC`);
+    } catch (e) {
+      setResult({ kind: 'error', msg: mapApiError(e, '充值失败') });
+    } finally {
+      setSubmitting(false);
+    }
+  }, [amount, updateUser]);
+
+  return (
+    <div style={{ paddingTop: 8 }}>
+      <Alert
+        className="bc-rise-2"
+        message="模拟法币入账（simulated fiat rail）"
+        description={
+          <Space direction="vertical" size="small">
+            <Text>
+              自助充值模拟外部法币存入。单次上限
+              <Tag color="gold" style={{ marginLeft: 6 }}>{MAX_DEPOSIT_PER_TX} BC</Tag>
+              ，24 小时滚动累计上限
+              <Tag color="gold" style={{ marginLeft: 6 }}>{MAX_DEPOSIT_PER_DAY} BC</Tag>
+              。
+            </Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              充值后 reserve_balance 与 SUM(users.balance) 同步增加，assertInvariant 自动校验。
+            </Text>
+          </Space>
+        }
+        type="info"
+        showIcon
+        style={{ marginBottom: 24 }}
+      />
+
+      <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>输入充值金额</h2>
+        <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
+          simulated fiat rail · 1-1000 bc per tx
+        </p>
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          <InputNumber
+            value={amount}
+            onChange={setAmount}
+            min={1}
+            max={MAX_DEPOSIT_PER_TX}
+            step={10}
+            precision={0}
+            parser={(v) => v.replace(/[^\d]/g, '')}
+            style={{ width: '100%', fontSize: 20, fontFamily: 'var(--font-mono)' }}
+            placeholder="输入充值金额（BC）"
+            size="large"
+          />
+          <Button
+            type="primary"
+            size="large"
+            icon={<ArrowRightOutlined />}
+            onClick={handleSubmit}
+            loading={submitting}
+            disabled={!Number.isInteger(amount) || amount <= 0}
+          >
+            确认充值
+          </Button>
+        </Space>
+      </section>
+
+      {result && (
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          {result.kind === 'success' ? (
+            <Result
+              status="success"
+              title={`+${result.deposited} BC 已入账`}
+              subTitle={`新余额：${result.new_balance} BC`}
+            />
+          ) : (
+            <Result
+              status="error"
+              title="充值失败"
+              subTitle={result.msg}
+            />
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+// ── 退币 Tab ──
+function RedeemTab({ updateUser }) {
   const [rawText, setRawText] = useState('');
   const [preview, setPreview] = useState({ phase: 'empty' });
   const publicKeyRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
-  const [lastToken, setLastToken] = useState(null);
 
+  // Load bank public key for local pre-verify
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -97,6 +272,7 @@ export default function PaymentPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Debounced local pre-verify (same logic as Payment.jsx)
   useEffect(() => {
     setResult(null);
     const text = rawText.trim();
@@ -142,7 +318,7 @@ export default function PaymentPage() {
           token: fmt.fields,
           verifyOk: ok,
           reason: ok
-            ? '本地预验签通过 (s\'·G == R\' + e\'·P)'
+            ? "本地预验签通过 (s'·G == R' + e'·P)"
             : '本地预验签失败：签名无效或字段被篡改',
         });
       } catch (e) {
@@ -161,56 +337,21 @@ export default function PaymentPage() {
     setSubmitting(true);
     setResult(null);
     try {
-      const { data } = await api.post('/payment', preview.token);
+      const { data } = await api.post('/bank/redeem', preview.token);
       updateUser({ balance: data.new_balance });
       setResult({
         kind: 'success',
-        msg: `已成功收款 ${data.deposited}`,
+        msg: `已退币 ${data.deposited} BC`,
         deposited: data.deposited,
         new_balance: data.new_balance,
       });
-      setLastToken(preview.token);
-      message.success(`收款成功：+${data.deposited}`);
+      message.success(`退币成功：+${data.deposited} BC`);
     } catch (e) {
-      setResult({ kind: 'error', msg: mapApiError(e, '收款失败') });
+      setResult({ kind: 'error', msg: mapApiError(e, '退币失败') });
     } finally {
       setSubmitting(false);
     }
   }, [preview, updateUser]);
-
-  const handleResubmit = useCallback(async () => {
-    if (!lastToken) return;
-    setSubmitting(true);
-    setResult(null);
-    try {
-      await api.post('/payment', lastToken);
-      setResult({ kind: 'error', msg: '服务器未拒绝重复 token (异常)' });
-    } catch (e) {
-      const code = e?.response?.data?.error;
-      if (code === 'DOUBLE_SPEND') {
-        setResult({
-          kind: 'error',
-          msg: '✓ 双花被服务器正确检测：409 DOUBLE_SPEND (serial 已在 spent_coins 表中)',
-          isDoubleSpend: true,
-        });
-        message.success('双花检测演示成功 (409)');
-      } else {
-        setResult({ kind: 'error', msg: mapApiError(e, '再次提交失败') });
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }, [lastToken]);
-
-  async function copyToken() {
-    if (!preview.token) return;
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(preview.token, null, 2));
-      message.success('Token 已复制');
-    } catch {
-      message.error('复制失败');
-    }
-  }
 
   const previewBadge = (() => {
     if (preview.phase === 'empty') {
@@ -219,7 +360,7 @@ export default function PaymentPage() {
           type="info"
           showIcon
           message="将 token JSON 粘贴到下方文本框"
-          description="token 来自顾客取款向导第 ④ 步：{ serial, amount, R_prime, s_prime }。本地会立即做预验签，通过后才能提交存款。"
+          description="退币 = 把自己取款得到的 token 兑付到自己账户。与商户收款共享 spent_coins 表（同一 token 只能兑付一次）。"
         />
       );
     }
@@ -247,58 +388,22 @@ export default function PaymentPage() {
             : <CloseCircleTwoTone twoToneColor="#eb2f96" />
         }
         message={preview.verifyOk ? '本地预验签通过 ✓' : '本地预验签失败 ✗'}
-        description={
-          <Space direction="vertical" size="small">
-            <Text>{preview.reason}</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              本地通过 ≠ 服务器一定接受（双花/并发仍会被 409）。服务器 verifySig 是最终权威。
-            </Text>
-          </Space>
-        }
+        description={preview.reason}
       />
     );
   })();
 
   return (
-    <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
-      {/* ── Page header ── */}
-      <header className="bc-rise-1" style={{ marginBottom: 28 }}>
-        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>收款</p>
-        <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
-          粘贴 token，本地预验签后存入
-        </h1>
-      </header>
-
-      {/* ── Balance strip ── */}
-      <section className="bc-card bc-rise-2" style={{ padding: '24px 28px', marginBottom: 24, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
-        <div>
-          <div className="bc-stat-label" style={{ marginBottom: 8 }}>当前余额</div>
-          <div className="bc-num" style={{ fontSize: 'clamp(34px, 4vw, 44px)', color: 'var(--gold-400)' }}>
-            {user?.balance ?? 0}
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--text-muted)', marginLeft: 8, letterSpacing: '0.1em' }}>BC</span>
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-          <Meta label="角色">
-            <span className="bc-chip bc-chip--emerald">{user?.role === 'merchant' ? '商户' : user?.role === 'customer' ? '顾客' : user?.role}</span>
-          </Meta>
-          <Meta label="用户名">
-            <span className="bc-mono" style={{ fontSize: 14, color: 'var(--paper-100)' }}>@{user?.username}</span>
-          </Meta>
-        </div>
-      </section>
-
-      {/* ── Safety banner ── */}
+    <div style={{ paddingTop: 8 }}>
       <Alert
         className="bc-rise-2"
-        message="粘贴 token 后会自动本地预验签"
-        description="通过 ✓ 后才能提交存款。服务器仍会独立做 verifySig + 双花检测，本地结果不替代服务器判定。"
+        message="退币：把取款得到的 token 兑付到自己账户"
+        description="redeem = processPayment({merchant_id: 自己, ...token})，与商户收款共享 spent_coins 表。本地预验签通过后才能提交。"
         type="info"
         showIcon
         style={{ marginBottom: 24 }}
       />
 
-      {/* ── 粘贴 token ── */}
       <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
         <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>粘贴 Token JSON</h2>
         <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
@@ -317,26 +422,19 @@ export default function PaymentPage() {
           style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
         />
         <Space style={{ marginTop: 18 }}>
-          <Button icon={<CopyOutlined />} onClick={copyToken} disabled={preview.phase !== 'ok'}>
-            复制 token
-          </Button>
           <Button
             type="primary"
             onClick={handleSubmit}
             loading={submitting}
             disabled={preview.phase !== 'ok' || !preview.verifyOk}
           >
-            提交存款
+            确认退币
           </Button>
         </Space>
       </section>
 
-      {/* ── 本地预验签 ── */}
       <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
-        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>本地预验签</h2>
-        <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
-          s'·G ?= R' + e'·P
-        </p>
+        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 18 }}>本地预验签</h2>
         {previewBadge}
 
         {preview.phase === 'ok' && preview.token && (
@@ -362,83 +460,23 @@ export default function PaymentPage() {
         )}
       </section>
 
-      {/* ── 存款结果 ── */}
       {result && (
         <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
-          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 18 }}>存款结果</h2>
           {result.kind === 'success' ? (
             <Result
               status="success"
-              title={`+${result.deposited} 已存入`}
-              subTitle={`新余额：${result.new_balance}`}
-              extra={
-                <Space>
-                  <Button
-                    type="primary"
-                    danger
-                    icon={<ThunderboltOutlined />}
-                    onClick={handleResubmit}
-                    loading={submitting}
-                  >
-                    再次提交同一 token（演示双花 → 409）
-                  </Button>
-                </Space>
-              }
+              title={`+${result.deposited} BC 已退币入账`}
+              subTitle={`新余额：${result.new_balance} BC`}
             />
           ) : (
             <Result
-              status={result.isDoubleSpend ? 'info' : 'error'}
-              title={result.isDoubleSpend ? '双花演示成功' : '收款失败'}
+              status="error"
+              title="退币失败"
               subTitle={result.msg}
-              extra={
-                result.isDoubleSpend ? (
-                  <Alert
-                    type="info"
-                    showIcon
-                    message="双花被服务器正确检测"
-                    description={
-                      <Space direction="vertical" size="small">
-                        <Text>
-                          本页演示「连续重复提交」——服务器必然 409 (serial 已入库)。
-                        </Text>
-                        <Text>
-                          并发场景：两个标签页同时提交同一 token，服务器串行化，一个 200 + 一个 409，哪个赢取决于调度。
-                        </Text>
-                      </Space>
-                    }
-                  />
-                ) : null
-              }
             />
           )}
         </section>
       )}
-
-      {/* ── 双花演示说明（可折叠） ── */}
-      <section className="bc-card" style={{ padding: 28 }}>
-        <Collapse
-          ghost
-          items={[{
-            key: 'double-spend',
-            label: <span className="bc-display" style={{ fontSize: 18 }}>关于双花演示</span>,
-            children: (
-              <>
-                <Paragraph style={{ fontSize: 13.5, marginBottom: 12, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
-                  1. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>连续重提</span>：同一 token 提交两次，
-                  第二次必然 <Tag color="red">409 DOUBLE_SPEND</Tag>，
-                  因 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>spent_coins.serial PRIMARY KEY</span> 已存在。
-                </Paragraph>
-                <Paragraph style={{ fontSize: 13.5, marginBottom: 0, color: 'var(--text-secondary)', lineHeight: 1.75 }}>
-                  2. <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>双标签页并发提交</span>：两个标签页同时提交同一 token，
-                  服务器 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>BEGIN IMMEDIATE</span> 串行化，
-                  一个 <Tag color="green">200</Tag> + 一个 <Tag color="red">409</Tag>，
-                  <Text strong style={{ color: 'var(--paper-100)' }}>具体哪个成功由调度决定，不保证先发起者赢</Text>。
-                </Paragraph>
-              </>
-            ),
-          }]}
-        />
-      </section>
     </div>
   );
 }

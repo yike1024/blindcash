@@ -4,9 +4,12 @@
 // the hero number, role/username metadata, and a single primary action that
 // matches the role (取款 for customer, 收款 for merchant). All M1-era plan
 // placeholders have been removed.
+//
+// Phase 1 (v5 §三 1.5 开户改革)：新用户 balance=0，需先到 /bank 充值才能
+// 取款。余额为 0 时主 CTA 指向"银行充值"而非"取款"，避免用户撞 INSUFFICIENT_BALANCE。
 
 import { useNavigate } from 'react-router-dom';
-import { ArrowRightOutlined, SafetyOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, SafetyOutlined, BankOutlined } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const ROLE_META = {
@@ -21,6 +24,7 @@ export default function DashboardPage() {
   const role = user?.role ?? 'customer';
   const meta = ROLE_META[role] ?? ROLE_META.customer;
   const balance = user?.balance ?? 0;
+  const needsFunding = balance === 0;
 
   return (
     <div className="bc-page" style={{ paddingTop: 40, paddingBottom: 64 }}>
@@ -52,7 +56,7 @@ export default function DashboardPage() {
               </span>
             </div>
             <div className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, letterSpacing: '0.06em' }}>
-              SIGNED BY BANK · ISSUED ON REGISTRATION
+              {needsFunding ? 'NEW ACCOUNT · BALANCE 0 · PLEASE DEPOSIT' : 'READY FOR BLIND WITHDRAWAL'}
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end' }}>
@@ -67,11 +71,12 @@ export default function DashboardPage() {
       </section>
 
       {/* ── Primary action card ── */}
+      {/* Phase 1 (v5 §三 1.5)：余额=0 时主 CTA 指向 /bank 充值，而非取款。 */}
       <section className="bc-card bc-rise-4" style={{ padding: 0, overflow: 'hidden' }}>
         <button
           type="button"
-          onClick={() => navigate(meta.route)}
-          aria-label={`前往${meta.verb}页`}
+          onClick={() => navigate(needsFunding ? '/bank' : meta.route)}
+          aria-label={needsFunding ? '前往银行充值页' : `前往${meta.verb}页`}
           style={{
             appearance: 'none',
             border: 0,
@@ -91,10 +96,12 @@ export default function DashboardPage() {
           onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
         >
           <div>
-            <div className="bc-eyebrow" style={{ marginBottom: 8 }}>下一步</div>
-            <h2 style={{ fontSize: 28, margin: 0 }}>{meta.verb}</h2>
+            <div className="bc-eyebrow" style={{ marginBottom: 8 }}>{needsFunding ? '待办' : '下一步'}</div>
+            <h2 style={{ fontSize: 28, margin: 0, display: 'inline-flex', alignItems: 'center', gap: 12 }}>
+              {needsFunding ? <><BankOutlined /> 充值</> : meta.verb}
+            </h2>
             <div className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
-              {meta.caption}
+              {needsFunding ? '模拟法币入账 · 单次上限 1000 BC · 日累计 5000 BC' : meta.caption}
             </div>
           </div>
           <span

@@ -24,7 +24,7 @@
 | 角色 | 可访问页面 | 可访问 API | 初始余额 |
 |------|-----------|-----------|----------|
 | 银行（系统） | — | 启动时自动初始化密钥对 | — |
-| 付款人 customer | `/dashboard` `/withdraw` | `/api/auth/*` `/api/withdraw/*` | 100（教学） |
+| 付款人 customer | `/dashboard` `/bank` `/withdraw` | `/api/auth/*` `/api/withdraw/*` `/api/bank/deposit` `/api/bank/redeem` | 0（需先充值） |
 | 收款人 merchant | `/dashboard` `/payment` | `/api/auth/*` `/api/payment` `/api/bank/pubkey` | 0 |
 
 **角色互斥**：注册时选定角色后不可切换；DB 层 `CHECK(role IN ('customer','merchant'))` 约束。
@@ -123,9 +123,31 @@ BC_DEMO_N=10 npm run dev
 1. 浏览器访问 http://localhost:5174/register
 2. 填写：用户名（如 `alice`）、密码（如 `pw123`）、角色选 **customer**
 3. 提交后自动跳转 /login
-4. 登录后跳转 /dashboard，可见初始余额 100
+4. 登录后跳转 /dashboard，可见初始余额 0；顶部出现"充值" CTA，点击进入 /bank
 
-### 4.2 取款 4-step 向导
+### 4.2 充值（/bank）
+
+> Phase 1 新增：新用户注册时余额为 0，必须先通过 /bank 充值才能取款。
+
+进入 `/bank`，可见两个 Tab：
+
+#### Tab 1：充值（deposit）
+
+1. 在 InputNumber 中输入充值金额（校验：1 ≤ amount ≤ 1000，单次上限 1000 BC；24h 滚动累计上限 5000 BC）
+2. 点击"充值"
+3. 后端 POST /api/bank/deposit：模拟外部法币入账，`BEGIN IMMEDIATE` 更新 `users.balance` 与 `bank_reserve.reserve_balance`，并调用 `assertInvariant` 校验
+4. 成功后跳回 /dashboard，余额 += amount
+
+#### Tab 2：退币（redeem）
+
+1. 在 InputNumber 中输入退币金额（校验：1 ≤ amount ≤ balance）
+2. 点击"退币"
+3. 后端 POST /api/bank/redeem：用户将自有 BC 退回银行，`BEGIN IMMEDIATE` 更新 `users.balance` 与 `bank_reserve.reserve_balance`，调用 `assertInvariant`
+4. 成功后跳回 /dashboard，余额 -= amount
+
+> **演示流程**：注册（balance=0）→ /bank 充值 100 BC → /withdraw 取款 30 BC → 复制 token → /payment（自身或另一商户）粘贴 token → 预验签 → 提交 → 商户 +30。
+
+### 4.3 取款 4-step 向导
 
 进入 `/withdraw`，可见 antd **Steps** 4 步骤向导：
 
@@ -171,13 +193,13 @@ BC_DEMO_N=10 npm run dev
 2. 点击"复制 token"按钮复制到剪贴板
 3. 系统提示：将 token 粘贴给 merchant 在 `/payment` 页面完成兑付
 
-### 4.3 取消取款
+### 4.4 取消取款
 
 - 任意 step 中点击顶部"取消取款"按钮
 - 后端 `POST /api/withdraw/cancel` 执行：`BEGIN IMMEDIATE` 退款 + session 状态推进为 cancelled
 - 前端清空 blindersRef 并回到 Step 0
 
-### 4.4 刷新 / 关闭页面的保护
+### 4.5 刷新 / 关闭页面的保护
 
 - `beforeunload` 事件触发：弹窗"将丢失盲化因子，本次取款需重新发起"
 - 用户确认离开后 session 仍在后端，5 分钟 TTL 过期后下次 init 自动退款
@@ -248,18 +270,19 @@ BC_DEMO_N=10 npm run dev
 
 | 步骤 | 操作 | 预期 |
 |------|------|------|
-| 1 | alice/customer 注册 + 登录 | balance = 100 |
-| 2 | alice 进入 /withdraw，输入 30，4 步完成取款 | balance = 70，复制 token |
-| 3 | bob/merchant 注册 + 登录 | balance = 0 |
-| 4 | bob 进入 /payment，粘贴 token，预验签 ✓ | 提交按钮可用 |
-| 5 | bob 点击"提交存款" | balance = 30，绿色成功提示 |
-| 6 | bob 点击"再次提交同 token" | 409 双花已检测 |
+| 1 | alice/customer 注册 + 登录 | balance = 0 |
+| 2 | alice 进入 /bank，充值 100 BC | balance = 100 |
+| 3 | alice 进入 /withdraw，输入 30，4 步完成取款 | balance = 70，复制 token |
+| 4 | bob/merchant 注册 + 登录 | balance = 0 |
+| 5 | bob 进入 /payment，粘贴 token，预验签 ✓ | 提交按钮可用 |
+| 6 | bob 点击"提交存款" | balance = 30，绿色成功提示 |
+| 7 | bob 点击"再次提交同 token" | 409 双花已检测 |
 
 ### 6.2 双商户并发演示（高级路径）
 
 | 步骤 | 操作 | 预期 |
 |------|------|------|
-| 1 | alice 完成 30 取款，复制 token | balance = 70 |
+| 1 | alice 注册 + /bank 充值 100 + 完成 30 取款，复制 token | balance = 70 |
 | 2 | bob/merchant 登录，在标签页 A 粘贴 token | 预验签 ✓ |
 | 3 | carol/merchant 登录（另一标签页 B）粘贴同一 token | 预验签 ✓ |
 | 4 | 在 A 与 B 几乎同时点击"提交存款" | 一个 200 一个 409 |

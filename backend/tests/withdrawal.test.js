@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb, runWrite } from '../src/models/db.js';
+import { initSchema, getDb, closeDb } from '../src/models/db.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { verifySig } from '../src/crypto/server/schnorrBlind.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
@@ -43,6 +43,7 @@ import { modN } from '../src/crypto/server/curve.js';
 import { TOKEN_DOMAIN_TAG } from '../src/config/bank.js';
 import { createUser } from '../src/services/userService.js';
 import { hashPassword, generateToken } from '../src/services/authService.js';
+import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-m4-withdrawal.db');
@@ -88,9 +89,11 @@ function hexToScalarFixed(hex) {
   return v;
 }
 
-function setBalance(userId, balance) {
-  runWrite('UPDATE users SET balance = ? WHERE id = ?', [balance, userId]);
-}
+// Phase 1: setBalance removed — direct UPDATE users.balance without
+// updating bank_reserve breaks assertInvariant. Use fundUser(id, amount)
+// (which calls bankService.deposit) for normal "give this user balance"
+// needs. The only place we still want balance=0 is the merchant in
+// beforeEach — and resetBalancesAndReserve(db) already sets ALL users to 0.
 
 function expireSession(sessionId) {
   const db = getDb();
@@ -177,8 +180,12 @@ beforeAll(async () => {
   db.exec('DELETE FROM transactions;');
   db.exec('DELETE FROM users;');
   db.exec('DELETE FROM bank_keys;');
+  // Phase 1: also reset bank_reserve singleton to 0 (otherwise leftover
+  // total_issued/total_redeemed from prior runs would break assertInvariant).
+  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   // create users directly via service layer (avoids HTTP registration overhead)
+  // Phase 1: new users register with balance=0; we fund the customer below.
   const cHash = await hashPassword(CUSTOMER.password);
   const cUser = createUser(CUSTOMER.username, cHash, CUSTOMER.role);
   customerToken = generateToken(cUser);
@@ -188,16 +195,20 @@ beforeAll(async () => {
   const mUser = createUser(MERCHANT.username, mHash, MERCHANT.role);
   merchantToken = generateToken(mUser);
   merchantId = mUser.id;
+
+  // Phase 1: fund the customer with 100 BC via deposit (properly updates
+  // bank_reserve + assertInvariant). Merchant stays at 0 (only /payment credits).
+  fundUser(customerId, 100);
 });
 
 beforeEach(() => {
+  // Phase 1: resetBalancesAndReserve clears protocol tables + all user
+  // balances to 0 + bank_reserve singleton to 0. Then fundUser properly
+  // deposits 100 BC into the customer (updates reserve + assertInvariant).
+  // Merchant stays at 0 (only /payment credits merchant.balance).
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  // reset balances: customer=100, merchant=0 (users registered in beforeAll)
-  setBalance(customerId, 100);
-  setBalance(merchantId, 0);
+  resetBalancesAndReserve(db);
+  fundUser(customerId, 100);
 });
 
 afterAll(async () => {
@@ -248,14 +259,15 @@ describe('M4: validation errors', () => {
   });
 
   it('merchant calls init → 201 (M7: 角色锁已解锁，任何登录用户都能取款)', async () => {
-    // 先给 merchant 余额（注册时 merchant 余额为 0）
-    setBalance(merchantId, 100);
+    // Phase 1: fund merchant via deposit so they can withdraw.
+    fundUser(merchantId, 100);
     const res = await api('/api/withdraw/init', { method: 'POST', token: merchantToken, body: { amount: 10 } });
     expect(res.status).toBe(201);
     expect(res.body.amount).toBe(10);
     // 清理：取消该 session 退回余额
     await api('/api/withdraw/cancel', { method: 'POST', token: merchantToken, body: { session_id: res.body.session_id } });
-    setBalance(merchantId, 0);
+    // Phase 1: merchant balance now 100 again (refund). beforeEach will reset
+    // on the next test, so no manual setBalance(merchantId, 0) needed here.
   });
 
   it('candidate count ≠ N → 400', async () => {
