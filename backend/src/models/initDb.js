@@ -1,13 +1,24 @@
-// models/initDb.js — M1: create the DB file + run schema.sql
+// models/initDb.js — M1 + M3: create the DB file, run schema.sql, ensure
+// the bank signing keypair exists.
 //
 // Run with: npm run init:db
-// Safe to re-run — uses CREATE TABLE IF NOT EXISTS.
+// Safe to re-run — uses CREATE TABLE IF NOT EXISTS and idempotent keypair
+// provisioning (getOrGenerate() only INSERTs if no row exists).
 
-import { initSchema, getDb, DB_PATH } from './db.js';
+import { initSchema, getDb } from './db.js';
+import { getOrGenerate } from '../services/bankKeyService.js';
+import { bytesToHex } from '../utils/hex.js';
 
-console.log(`[initDb] Database path: ${DB_PATH}`);
 initSchema();
 const db = getDb();
+console.log(`[initDb] Database path: ${db.name}`);
+
+// M3: ensure the bank signing keypair exists (singleton row id=1).
+// On first boot this generates x ∈ [1, n-1], P = x·G and persists them.
+// On subsequent boots it reads the existing row back (no regeneration —
+// regenerating would invalidate every previously-issued token).
+const kp = getOrGenerate();
+console.log(`[initDb] Bank public key: ${bytesToHex(kp.publicKey)}`);
 
 // Sanity: list tables created
 const tables = db.prepare(

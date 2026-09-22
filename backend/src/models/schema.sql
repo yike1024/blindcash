@@ -1,8 +1,8 @@
--- BlindCash DDL (SQLite, WAL mode) — M1
+-- BlindCash DDL (SQLite, WAL mode) — M1 + M3
 --
--- M1 scope: ONLY the users table (identity + role + fiat balance).
+-- M1 scope: users table (identity + role + fiat balance).
+-- M3 scope: bank_keys table (singleton bank signing keypair).
 -- Later milestones add:
---   bank_keys            (M2 — bank signing key pair)
 --   withdrawal_sessions  (M4 — 4-move protocol state machine)
 --   spent_coins          (M5 — double-spend detection)
 --
@@ -26,4 +26,16 @@ CREATE TABLE IF NOT EXISTS users (
     role          TEXT NOT NULL CHECK(role IN ('customer','merchant')),
     balance       INTEGER NOT NULL DEFAULT 0,     -- fiat account balance (smallest unit)
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ── 密钥层：银行签名密钥（单行，启动时生成） ──
+-- ⚠ 教学演示用：私钥明文存 DB。生产应加密 / HSM / Shamir 分片——密钥安全是另一独立维度。
+-- ⚠ 测试不应依赖读 private_key 证明任何事（密钥泄露属于密钥安全维度，非协议维度）。
+--   (ISOLATION.md §五 不变量 7)
+CREATE TABLE IF NOT EXISTS bank_keys (
+    id            INTEGER PRIMARY KEY,
+    public_key   BLOB NOT NULL,            -- 33-byte compressed P = xG
+    private_key   BLOB NOT NULL,           -- 32-byte x
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CHECK(id = 1)                            -- singleton
 );
