@@ -33,6 +33,10 @@ export default function AppLayout() {
 
   const menuItems = [
     { key: '/dashboard', label: <Link to="/dashboard">仪表盘</Link> },
+    // M6: customer-only 取款入口 (merchant 不显示)
+    ...(user?.role === 'customer'
+      ? [{ key: '/withdraw', label: <Link to="/withdraw">取款</Link> }]
+      : []),
   ];
 
   return (

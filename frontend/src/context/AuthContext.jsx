@@ -33,6 +33,18 @@ export function AuthProvider({ children }) {
     setUser(userValue);
   }, []);
 
+  // M6: partial-update the cached user (e.g. after /withdraw/init debits
+  // balance, /withdraw/cancel refunds). We patch sessionStorage too so the
+  // state survives a tab focus change. Token is untouched.
+  const updateUser = useCallback((patch) => {
+    setUser((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+      sessionStorage.setItem('bc_user', JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
   const logout = useCallback(() => {
     sessionStorage.removeItem('bc_token');
     sessionStorage.removeItem('bc_user');
@@ -44,6 +56,7 @@ export function AuthProvider({ children }) {
     user,
     token,
     login,
+    updateUser,
     logout,
     loading,
     isAuthed: !!token,
