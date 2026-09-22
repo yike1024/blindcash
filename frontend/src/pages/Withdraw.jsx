@@ -32,7 +32,7 @@ import { generateBlinders, computeBlindedCommitment, unblindResponse } from '@cr
 import { hashToScalar } from '@crypto/server/hashToScalar.js';
 import { modN } from '@crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '@utils/hex.js';
-import { TOKEN_DOMAIN_TAG, SESSION_TTL_MS } from '@config/bank.js';
+import { TOKEN_DOMAIN_TAG } from '@crypto/client/protocolConstants.js';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -177,8 +177,10 @@ export default function WithdrawPage() {
 
       // Call init.
       const { data } = await api.post('/withdraw/init', { amount });
-      // data = { session_id, R: ["hex66"...], amount, N }
-      const expires_at = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+      // data = { session_id, R: ["hex66"...], amount, N, ttl_ms }
+      // expires_at uses the server-returned ttl_ms (single source of truth —
+      // the backend may override SESSION_TTL_MS via BC_SESSION_TTL_MS).
+      const expires_at = new Date(Date.now() + data.ttl_ms).toISOString();
       const newSession = {
         session_id: data.session_id,
         R: data.R,

@@ -29,8 +29,12 @@ export const SESSION_TTL_MS = Number(process.env.BC_SESSION_TTL_MS) || 5 * 60 * 
  * to prevent cross-protocol signature reuse.
  *
  * NOTE: changing this tag invalidates every previously-issued token.
+ *
+ * M6 修复：定义下沉到 crypto/client/protocolConstants.js（前端密码学子集可
+ * 安全引用，无 Node 依赖）。本文件 import 后 re-export，保持后端 API 不变。
  */
-export const TOKEN_DOMAIN_TAG = 'blindcash-v1';
+import { TOKEN_DOMAIN_TAG } from '../crypto/client/protocolConstants.js';
+export { TOKEN_DOMAIN_TAG };
 
 /**
  * Bank keys singleton row id. The bank_keys table is constrained by

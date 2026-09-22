@@ -103,10 +103,10 @@ export function lazyCleanupExpiredSessions(customerId) {
  *      - generate N fresh k_i (randomScalar — 不变量 5, never reused)
  *      - compute R_i = k_i·G (bankStep1)
  *      - INSERT session(pending, expires_at)
- *   3. return { session_id, R_1..R_N, amount, N }
+ *   3. return { session_id, R_1..R_N, amount, N, ttl_ms }
  *
  * @param {{customer_id:number, amount:number}} args
- * @returns {{session_id:string, R:string[], amount:number, N:number}}
+ * @returns {{session_id:string, R:string[], amount:number, N:number, ttl_ms:number}}
  */
 export function initWithdrawal({ customer_id, amount }) {
   if (!Number.isInteger(amount) || amount <= 0) {
@@ -159,7 +159,9 @@ export function initWithdrawal({ customer_id, amount }) {
        VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
     ).run(sessionId, customer_id, amount, N, JSON.stringify(candidates), expiresAt);
 
-    return { session_id: sessionId, R: Rlist, amount, N };
+    // M6: return ttl_ms so the frontend countdown uses the server's real TTL
+    // (single source of truth — BC_SESSION_TTL_MS may override the default).
+    return { session_id: sessionId, R: Rlist, amount, N, ttl_ms: SESSION_TTL_MS };
   });
 }
 
