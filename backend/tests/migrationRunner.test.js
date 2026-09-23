@@ -148,10 +148,14 @@ describe('Phase 0 migration runner', () => {
     // Other tables (bank_keys etc.) SHOULD exist — baseline was skipped (no
     // users re-creation), but 002_bank_reserve.sql and 003 ran and created
     // their tables. bank_reserve should exist from 002.
+    // Phase 3: 004 (audit_log) + 005 (bank_keys rebuild) + 006 (spent_coins
+    // key_version) also ran — bank_keys now has the new multi-key schema.
     const tables = db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`
     ).all().map(r => r.name);
     expect(tables).toContain('bank_reserve');
+    expect(tables).toContain('audit_log');
+    expect(tables).toContain('bank_keys');
   });
 
   // ──────────────────────────────────────────────────────────────────────
@@ -168,8 +172,10 @@ describe('Phase 0 migration runner', () => {
     // Capture row count + checksum after first run.
     // Phase 1: 002_bank_reserve.sql + 003_users_role_add_admin.sql now apply
     // successfully (migrationRunner fixed to handle explicit BEGIN/COMMIT).
+    // Phase 3: 004_audit_log + 005_bank_keys_rebuild + 006_spent_coins_key_version
+    // also apply → total 6 migrations.
     const rowsAfterFirst = listAppliedMigrations(db);
-    expect(rowsAfterFirst.length).toBe(3);  // 001 baseline + 002 + 003
+    expect(rowsAfterFirst.length).toBe(6);  // 001 baseline + 002 + 003 + 004 + 005 + 006
 
     // Run again — should be a no-op.
     runMigrations(db, {
@@ -178,8 +184,8 @@ describe('Phase 0 migration runner', () => {
       schemaMigrationsPath: REAL_SCHEMA_MIGRATIONS_DDL,
     });
     const rowsAfterSecond = listAppliedMigrations(db);
-    expect(rowsAfterSecond.length).toBe(3);  // still 3, no new migrations
-    expect(rowsAfterSecond[2].version).toBe(3);  // highest version is 003
+    expect(rowsAfterSecond.length).toBe(6);  // still 6, no new migrations
+    expect(rowsAfterSecond[5].version).toBe(6);  // highest version is 006
 
     // users table should still exist exactly once.
     const usersCount = db.prepare(`SELECT COUNT(*) as c FROM users`).get();
@@ -199,13 +205,13 @@ describe('Phase 0 migration runner', () => {
       schemaMigrationsPath: REAL_SCHEMA_MIGRATIONS_DDL,
     });
 
-    // Set up a temp migrations dir with a deliberately bad 004 migration.
-    // Phase 1: use 004 (not 002) because the first run already applied 001-003,
-    // so a 002_bad.sql would be skipped as "already applied".
+    // Set up a temp migrations dir with a deliberately bad 007 migration.
+    // Phase 3: use 007 (not 004) because the first run already applied 001-006,
+    // so a 004_bad.sql would be skipped as "already applied".
     const badMigrationsDir = join(DATA_DIR, `bad-migrations-${Date.now()}`);
     mkdirSync(badMigrationsDir, { recursive: true });
     writeFileSync(
-      join(badMigrationsDir, '004_bad.sql'),
+      join(badMigrationsDir, '007_bad.sql'),
       `CREATE TABLE migration_should_not_exist (id INTEGER);\nTHIS IS NOT VALID SQL;\n`,
     );
 
@@ -219,11 +225,11 @@ describe('Phase 0 migration runner', () => {
         })
       ).toThrow();
 
-      // version=4 must NOT be recorded (transaction rolled back).
-      const v4 = db.prepare(
-        `SELECT 1 FROM schema_migrations WHERE version = 4`
+      // version=7 must NOT be recorded (transaction rolled back).
+      const v7 = db.prepare(
+        `SELECT 1 FROM schema_migrations WHERE version = 7`
       ).get();
-      expect(v4).toBeUndefined();
+      expect(v7).toBeUndefined();
 
       // The partial table from the bad migration must NOT exist (rollback).
       const badTable = db.prepare(
@@ -254,14 +260,14 @@ describe('Phase 0 migration runner', () => {
       schemaMigrationsPath: REAL_SCHEMA_MIGRATIONS_DDL,
     });
 
-    // Set up a temp migrations dir with a 005 file (skipping 004 on purpose).
-    // Phase 1: use 005 (not 003) because the first run already applied 001-003,
-    // so a 003_gap_test.sql would be skipped as "already applied".
-    // The runner should warn about the gap (3→5, skipping 4) but still apply 005.
+    // Set up a temp migrations dir with a 008 file (skipping 007 on purpose).
+    // Phase 3: use 008 (not 005) because the first run already applied 001-006,
+    // so a 005_gap_test.sql would be skipped as "already applied".
+    // The runner should warn about the gap (6→8, skipping 7) but still apply 008.
     const gapMigrationsDir = join(DATA_DIR, `gap-migrations-${Date.now()}`);
     mkdirSync(gapMigrationsDir, { recursive: true });
     writeFileSync(
-      join(gapMigrationsDir, '005_gap_test.sql'),
+      join(gapMigrationsDir, '008_gap_test.sql'),
       `CREATE TABLE gap_test_table (id INTEGER PRIMARY KEY);\n`,
     );
 
@@ -277,19 +283,19 @@ describe('Phase 0 migration runner', () => {
         warn: warnSpy,
       });
 
-      // The gap warn should have fired for 005 (lastApplied=3, thisVersion=5).
+      // The gap warn should have fired for 008 (lastApplied=6, thisVersion=8).
       const gapWarn = warns.find(w => typeof w === 'object' && w.msg === 'gap in migration chain');
       expect(gapWarn).toBeDefined();
-      expect(gapWarn.file).toBe('005_gap_test.sql');
-      expect(gapWarn.lastApplied).toBe(3);
-      expect(gapWarn.thisVersion).toBe(5);
+      expect(gapWarn.file).toBe('008_gap_test.sql');
+      expect(gapWarn.lastApplied).toBe(6);
+      expect(gapWarn.thisVersion).toBe(8);
 
-      // 005 should still have been applied despite the gap warn.
-      const v5 = db.prepare(
-        `SELECT version, name FROM schema_migrations WHERE version = 5`
+      // 008 should still have been applied despite the gap warn.
+      const v8 = db.prepare(
+        `SELECT version, name FROM schema_migrations WHERE version = 8`
       ).get();
-      expect(v5).toBeDefined();
-      expect(v5.name).toBe('005_gap_test');
+      expect(v8).toBeDefined();
+      expect(v8.name).toBe('008_gap_test');
 
       // The gap_test_table should exist.
       const table = db.prepare(

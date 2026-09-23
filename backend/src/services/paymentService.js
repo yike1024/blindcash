@@ -32,13 +32,13 @@
 //          double-spend defense in depth.
 
 import { createHash } from 'node:crypto';
-import { runImmediateTx } from '../models/db.js';
-import { getActivePublicKey, getPublicKeyByVersion } from './bankKeyService.js';
+import { getActivePublicKey, getPublicKeyByVersion, getActiveKeyVersion, BankKeyError } from './bankKeyService.js';
 import { verifySig } from '../crypto/server/schnorrBlind.js';
 import { n, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { hexToBytes } from '../utils/hex.js';
 import { recordTransaction } from './transactionService.js';
-import { assertInvariant } from './bankReserveService.js';
+import { assertInvariant, runInvariantCheckedTx } from './bankReserveService.js';
+import { logAction } from './auditService.js';
 
 /**
  * Error carrying an HTTP status. Routes catch this and map to res.status().
@@ -195,14 +195,21 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
   //    check failed). This is not an oracle: the attacker already knows
   //    whether they constructed a well-formed token.
   //
-  //    Phase 1 (v5 §三 checklist #3 N4 修正)：service 层用
-  //    `getPublicKeyByVersion(key_id)` 而不是重载 `getPublicKey(key_id?)`。
-  //    key_id 缺省（旧 token 或 redeem 路由未传）时 fallback 到
-  //    getActivePublicKey()——Phase 1 两个函数返回同一把 key，Phase 3
-  //    多密钥轮换后才会真正分流。
-  const publicKey = (key_id != null)
-    ? getPublicKeyByVersion(key_id)
-    : getActivePublicKey();
+  //    Phase 3 (v5 §三 3.2 落地)：service 层用
+  //    `getPublicKeyByVersion(key_id)` 查对应版本公钥验签。key_id 缺省
+  //    （旧 token 或 redeem 路由未传）时 fallback 到 getActivePublicKey()。
+  //    BankKeyError (KEY_RETIRED / KEY_NOT_FOUND) → PaymentError 映射。
+  let publicKey;
+  try {
+    publicKey = (key_id != null)
+      ? getPublicKeyByVersion(key_id)
+      : getActivePublicKey();
+  } catch (e) {
+    if (e instanceof BankKeyError) {
+      throw new PaymentError(e.status, e.code, e.message);
+    }
+    throw e;
+  }
   const ok = verifySig(RPrimeBytes, sPrime, serialBytes, amount, publicKey);
   if (!ok) {
     throw new PaymentError(400, 'SIGNATURE_INVALID',
@@ -214,7 +221,8 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
 
   // 4. Atomic deposit (BEGIN IMMEDIATE holds the write lock for the full block).
   //    Any throw inside → transaction rolls back, no partial state.
-  return runImmediateTx((db) => {
+  //    Phase 3: runInvariantCheckedTx wraps with audit on invariant_violation.
+  return runInvariantCheckedTx((db) => {
     // Primary double-spend guard: same serial already spent → 409.
     const existing = db.prepare(
       `SELECT 1 FROM spent_coins WHERE serial = ?`,
@@ -224,34 +232,28 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
         'this token has already been spent');
     }
 
+    // Phase 3 (v5 §三 3.2)：spent_coins INSERT 带 key_version 列，记录
+    // 这枚 token 是用哪个 key_version 签发的。key_id 缺省时用当前 active
+    // key_version（前向兼容旧 token 路径）。
+    const keyVersion = (key_id != null) ? key_id : getActiveKeyVersion();
+
     // Insert spent_coins row. idx_sc_token_hash UNIQUE is the belt-and-suspenders
     // guard for the corner case where two different serials produce the same
     // (R', s') tuple (shouldn't happen under correct protocol, but the UNIQUE
     // index makes it a DB-level invariant — see schema.sql comment).
-    //
-    // NOTE on test coverage: this collision-fallback path is NOT exercised
-    // by payment.test.js. Constructing a collision requires either finding
-    // a SHA256 preimage (infeasible) or two different serials hashing to
-    // the same token_hash under the same (R', s') — which violates the
-    // protocol's own invariants. The fallback exists as defense-in-depth;
-    // the PRIMARY guard (same serial → 409) is the one actually tested.
-    // (Professor's M5 acceptance #4 — token_hash bytes concat + UNIQUE —
-    // is covered indirectly: the same-token retry test produces the same
-    // bytes → same hash → UNIQUE violation on the serial PRIMARY, which is
-    // the path real double-spends take.)
     try {
       db.prepare(
-        `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash, key_version)
+         VALUES (?, ?, ?, ?, ?)`,
       ).run(
         Buffer.from(serialBytes),
         amount,
         merchant_id,
         Buffer.from(tokenHash),
+        keyVersion,
       );
     } catch (e) {
       // UNIQUE violation on token_hash (different serial, same (R', s')).
-      // See NOTE above re: test coverage — this path is defense-in-depth.
       if (e.message && e.message.includes('UNIQUE')) {
         throw new PaymentError(409, 'DOUBLE_SPEND',
           "token_hash collision — same (R', s') already spent under a different serial");
@@ -285,6 +287,16 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
               updated_at = CURRENT_TIMESTAMP
         WHERE id = 1`
     ).run(amount);
+
+    // Phase 3 (N1 落地)：payment 审计日志写在事务内
+    logAction({
+      actor_id: merchant_id,
+      action: 'payment',
+      amount,
+      target: Buffer.from(serialBytes).toString('hex').slice(0, 16) + '...',
+      meta: JSON.stringify({ key_version: keyVersion }),
+      db,
+    });
 
     // assertInvariant 在事务内调用——失败时整个 BEGIN IMMEDIATE 回滚，
     // 不会出现 spent_coins 插了但 total_redeemed 没加的半状态。

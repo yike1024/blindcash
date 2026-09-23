@@ -19,7 +19,7 @@
 import { Router } from 'express';
 import { authenticateJWT } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
-import { getActivePublicKey } from '../services/bankKeyService.js';
+import { getActivePublicKey, getActiveKeyVersion } from '../services/bankKeyService.js';
 import { deposit, BankServiceError } from '../services/bankService.js';
 import { processPayment, PaymentError } from '../services/paymentService.js';
 import { getDb } from '../models/db.js';
@@ -51,10 +51,10 @@ router.get('/pubkey', (_req, res) => {
     // encoding hint for clients: 33-byte secp256k1 compressed point
     encoding: 'secp256k1-compressed',
     byte_length: 33,
-    // Phase 1 (v5 §三 1.7 token v2)：返回当前 active 密钥的 key_id，让前端
-    // 取款时把 key_id 写入 token v2 schema，支付/退币时拿它查公钥验签。
-    // Phase 3 多密钥轮换后此字段会随 active 切换而变化。
-    key_id: 1,
+    // Phase 3 (v5 §三 3.2)：返回当前 active 密钥的真实 key_version，
+    // 前端取款时把 key_id 写入 token v2 schema，支付/退币时拿它查公钥验签。
+    // 密钥轮换后此字段会随 active 切换而变化。
+    key_id: getActiveKeyVersion(),
   });
 });
 

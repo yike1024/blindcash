@@ -15,19 +15,20 @@
 //   §三-5 (nonce-fresh):  N fresh k_i generated per init, never reused.
 //   §一-1 (balance):     init debits, cancel/expire/abort refund customer.balance.
 //
-// All balance mutations run inside runImmediateTx so the write lock is held
+// All balance mutations run inside runInvariantCheckedTx so the write lock is held
 // for the full check+update — no TOCTOU window for double-debit / double-refund.
 
 import { randomUUID } from 'node:crypto';
-import { queryOne, runWrite, runImmediateTx } from '../models/db.js';
-import { getActivePublicKey, getPrivateKey } from './bankKeyService.js';
+import { queryOne, runWrite } from '../models/db.js';
+import { getActivePublicKey, getPrivateKey, getActiveKeyVersion } from './bankKeyService.js';
 import { bankStep1, bankStep3 } from '../crypto/server/schnorrBlind.js';
 import { verifyRevealed, pickRandomJ } from '../crypto/server/cutAndChoose.js';
 import { randomScalar, scalarToBytes, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '../utils/hex.js';
 import { CUT_AND_CHOOSE_N, SESSION_TTL_MS } from '../config/bank.js';
 import { recordTransaction } from './transactionService.js';
-import { assertInvariant } from './bankReserveService.js';
+import { assertInvariant, runInvariantCheckedTx } from './bankReserveService.js';
+import { logAction } from './auditService.js';
 
 /**
  * Error carrying an HTTP status. Routes catch this and map to res.status().
@@ -57,7 +58,7 @@ function hexToScalar(hex) {
 
 /**
  * Refund a session's amount back to its owner and flip status.
- * MUST run inside an open transaction (caller's runImmediateTx).
+ * MUST run inside an open transaction (caller's runInvariantCheckedTx).
  * @param {import('better-sqlite3').Database} db
  * @param {{id:string, customer_id:number, amount:number}} session
  * @param {'aborted'|'cancelled'|'expired'} newStatus
@@ -93,7 +94,7 @@ export function refundAndClose(db, session, newStatus) {
  * @returns {number} count of sessions expired
  */
 export function lazyCleanupExpiredSessions(customerId) {
-  return runImmediateTx((db) => {
+  return runInvariantCheckedTx((db) => {
     const now = new Date().toISOString();
     const expired = db.prepare(
       `SELECT id, customer_id, amount FROM withdrawal_sessions
@@ -138,7 +139,7 @@ export function initWithdrawal({ customer_id, amount }) {
   // ① lazy-cleanup this customer's expired sessions before considering a new one
   lazyCleanupExpiredSessions(customer_id);
 
-  return runImmediateTx((db) => {
+  return runInvariantCheckedTx((db) => {
     // 不变量 4: at most one active session per customer
     const active = db.prepare(
       `SELECT id FROM withdrawal_sessions
@@ -223,7 +224,7 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
 
   // ⚠退款必须在事务内正常提交（不能 throw 导致回滚）：用 result 对象携带
   // error 出事务，在事务外 throw，这样退款 UPDATE 持久化，错误仍正确传播。
-  const result = runImmediateTx((db) => {
+  const result = runInvariantCheckedTx((db) => {
     const session = db.prepare(
       `SELECT * FROM withdrawal_sessions WHERE id = ? AND customer_id = ?`,
     ).get(session_id, customer_id);
@@ -305,7 +306,7 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
 
   // ⚠退款必须在事务内正常提交（不能 throw 导致回滚）：用 result 对象携带
   // error 出事务，在事务外 throw，这样退款/abort UPDATE 持久化，错误仍正确传播。
-  const result = runImmediateTx((db) => {
+  const result = runInvariantCheckedTx((db) => {
     const session = db.prepare(
       `SELECT * FROM withdrawal_sessions WHERE id = ? AND customer_id = ?`,
     ).get(session_id, customer_id);
@@ -408,9 +409,20 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
       note: '取款',
     });
 
+    // Phase 3 (N1 落地)：withdraw 审计日志写在事务内
+    logAction({
+      actor_id: customer_id,
+      action: 'withdraw',
+      amount: session.amount,
+      target: session_id,
+      db,
+    });
+
     assertInvariant(db);
 
-    return { s_j: scalarToHex(sJ), key_id: 1 };
+    // Phase 3 (v5 §三 3.2)：返回真实 active key_version，不再硬编码 1。
+    // 前端取 token v2 schema 的 key_id = 此值，支付/退币时拿它查公钥验签。
+    return { s_j: scalarToHex(sJ), key_id: getActiveKeyVersion() };
   });
 
   if (result.error) throw result.error;
@@ -424,7 +436,7 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
  * @returns {{refunded:number, new_balance:number}}
  */
 export function cancelWithdrawal({ session_id, customer_id }) {
-  return runImmediateTx((db) => {
+  return runInvariantCheckedTx((db) => {
     const session = db.prepare(
       `SELECT * FROM withdrawal_sessions WHERE id = ? AND customer_id = ?`,
     ).get(session_id, customer_id);

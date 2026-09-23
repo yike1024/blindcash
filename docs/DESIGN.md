@@ -469,3 +469,71 @@ IndexedDB **无加密**，token 以明文形式存储在浏览器中。如果应
 ### 9.5 为什么不加密也要存 IndexedDB 而不是 sessionStorage
 
 sessionStorage 关标签页即丢失——token 直接消失，用户钱没了。IndexedDB 持久化是"功能正确性"的底线，加密是"安全增强"。教学系统选了"功能正确 + 诚实标注"的折中。
+
+---
+
+## 10. 银行私钥 at-rest 加密与密钥轮换（Phase 3）
+
+### 10.1 AES-256-GCM at-rest 加密——威胁模型与诚实边界
+
+Phase 3 在 `bank_keys.private_key` 列上落地了 AES-256-GCM at-rest 加密。**DB 中的私钥不再是 32 字节明文，而是 60 字节密文**（`nonce[12] + ciphertext[32] + tag[16]`），由 `BC_MASTER_KEY`（32-byte hex 字符串）加密 [1][2]。
+
+**这个加密实际防什么 / 不防什么——必须诚实标注**：
+
+| 威胁 | 是否防御 | 说明 |
+|---|---|---|
+| DB 文件泄露（备份外泄、磁盘被偷） | ✅ 防 | 没有 `BC_MASTER_KEY` 的攻击者拿到 `.db` 文件只能看到密文，无法重建私钥 |
+| 服务器进程被攻破（RCE / 内存 dump） | ❌ **不防** | 进程运行时 `MASTER_KEY` 必然在内存明文（`Buffer.from(MASTER_KEY, 'hex')`），且解密后的私钥也在 `bankKeyService._activeCache` 中。攻击者可以直接读内存拿到明文私钥 |
+| 主机管理员 / DBA 恶意 | ⚠️ 部分防 | 防"只拿 DB 文件"的 DBA，不防"既能拿 DB 又能读 env / proc 内存"的 root |
+| 内核级攻击 / 硬件攻击 | ❌ 不防 | 超出本系统威胁模型 |
+| 真实 HSM（hardware security module） | ❌ 未实现 | 真实 HSM 的语义是"签名动作发生在硬件内部，私钥永不出设备" [3]。本系统的 `getPrivateKey()` 在进程内存中返回明文 x——这不是 HSM |
+
+**结论（必须写在前面）**：本系统**没有实现 HSM**，AES-256-GCM 加密**只防 DB 文件静默泄露这一种场景**。教学系统的威胁模型假设服务器进程不被攻破——如果进程被控，所有防御在 `getPrivateKey()` 返回明文的那一刻就归零。
+
+### 10.2 BC_MASTER_KEY 格式与生命周期
+
+- **格式**：32-byte hex 字符串（64 字符），不是 passphrase→KDF——避免 KDF rounds 引入的启动延迟与"passphrase 弱"问题 [2]
+- **来源**：环境变量 `BC_MASTER_KEY`（生产：CI secrets / K8s secret 注入；测试：未设时生成 ephemeral key 并 logger.warn）
+- **生命周期**：进程启动时读一次，常驻 `_masterKeyBuf`；轮换 MASTER_KEY 需重加密整张 `bank_keys` 表（本系统未实现此工具—— MASTER_KEY 轮换是运维操作，密钥轮换是协议操作，二者不同维度）
+
+### 10.3 密钥轮换（rotateKey）——协议层操作
+
+Phase 3 实现了**密钥轮换**：管理员调用 `POST /api/admin/rotate-key` 后：
+
+1. 当前 `status='active'` 的密钥标 `status='retired'`，写 `retired_at=now`、`retired_until=now+90d`
+2. 生成新 keypair，AES-GCM 加密私钥，`INSERT` 一行 `key_version=旧+1, status='active'`
+3. 清空 `_activeCache` + 删除旧 key_version 的 `_versionCache` 条目
+
+**90 天宽限期**（v5 §三 3.2）：旧 token 拿 `key_id=旧 key_version` 调 `getPublicKeyByVersion(v)` 仍能查到旧公钥做验签；过了 `retired_until` 后调用 → `BankKeyError(403, 'KEY_RETIRED')`——银行不再兑付过期 token。这避免了"银行永久保留所有历史私钥"的反模式 [4]。
+
+### 10.4 M3 分层修正——crypto 层不碰 DB
+
+`verifySig({R_prime, s_prime, e_prime, publicKey, serial, amount})` 的**函数签名 Phase 3 未变**。这是 v5 §三 3.2 M3 修正的核心：crypto 层是纯函数，**不查 DB、不知道 key_id**。`paymentService` 负责从 `token.key_id` 解析出 `publicKey`（调 `getPublicKeyByVersion(key_id)`），再把 publicKey 传给 `verifySig` [5]。
+
+这样 crypto 层可独立单测（`schnorrBlind.test.js` 19 个测试全过），而 DB / 多密钥 lookup 的复杂性留在 service 层（`bankKeyService.test.js` + `admin.test.js` 覆盖）。
+
+### 10.5 审计日志（audit_log）——动作全集
+
+Phase 3 引入 `audit_log` 表（`004_audit_log.sql`），`auditService.logAction` 在所有关键操作路径写入：
+
+| action | 触发点 | 写入事务 |
+|---|---|---|
+| `deposit` | `bankService.deposit` | 调用方事务内（成功才留痕） |
+| `withdraw` | `withdrawalService.initWithdrawal` | 调用方事务内 |
+| `payment` | `paymentService.processPayment` | 调用方事务内 |
+| `redeem` | `bankService.redeem`（v2 token） | 调用方事务内 |
+| `key_rotate` | `bankKeyService.rotateKey`（admin 路由） | 独立事务（rotateKey 不在 tx 内） |
+| `cancel` | `withdrawalService.cancelSession` | 调用方事务内 |
+| `expire` | `withdrawalService.refundAndClose(...,'expired')` | 调用方事务内 |
+| `invariant_violation` | `bankReserveService.runInvariantCheckedTx` catch 块 | **事务外**——失败事务已回滚，日志写在 catch 块的独立隐式事务中 |
+
+**`invariant_violation` 的写入路径特殊**：事务已经回滚，所以 `runInvariantCheckedTx` 在 catch 块中（事务外）调 `logAction`，让 `auditService` 用自己的隐式事务写入。这保证"即使整笔交易回滚，违反不变量的行为也被记录"——是 M1 缺陷修复的关键部分 [6]。
+
+### 10.6 文献参考
+
+- [1] NIST SP 800-38D · §5.2.1.2 — AES-GCM 的 nonce 长度建议为 96 bit（本系统用 12 byte 随机 nonce，与建议一致）
+- [2] NIST SP 800-132 · §4.1 — passphrase→KDF 的密钥派生模型；本系统采用直接 hex 密钥避免 KDF rounds 延迟
+- [3] NIST SP 800-57rev5 · §5.3 — HSM 的"密钥永不出设备"语义
+- [4] NIST SP 800-57rev5 · §8.3.4 — "cryptoperiod" 概念，过期密钥进入 "deactivated" 状态而非永久保留
+- [5] OWASP ASVS L1 v4.0.31 §2.10 — "verify that signature verification is performed in a separate component from signature creation"，本系统的 crypto 层 / service 层分层即此原则
+- [6] NIST SP 800-92rev1 · §3 — 审计日志应记录"安全相关事件"的成败两面，invariant_violation 是失败面的关键事件

@@ -25,10 +25,10 @@
 //   recordTransaction(kind='deposit', counterparty='bank')
 //   assertInvariant(db)  — 失败回滚整个事务
 
-import { runImmediateTx, queryOne } from '../models/db.js';
+import { queryOne } from '../models/db.js';
 import { recordTransaction } from './transactionService.js';
-import { assertInvariant } from './bankReserveService.js';
-import { logger } from '../utils/logger.js';
+import { assertInvariant, runInvariantCheckedTx } from './bankReserveService.js';
+import { logAction } from './auditService.js';
 
 /**
  * Single-deposit cap (BC units). Deposits above this are rejected with 400.
@@ -96,8 +96,9 @@ export function deposit({ user_id, amount, ip }) {
       `24h rolling cap is ${MAX_DEPOSIT_PER_DAY} BC (current: ${dailyTotal})`);
   }
 
-  // runImmediateTx: 所有 balance 变更原子化，失败 assertInvariant 回滚
-  return runImmediateTx((db) => {
+  // runInvariantCheckedTx: 所有 balance 变更原子化，失败 assertInvariant 回滚
+  // + 在 catch 块中写 invariant_violation 审计日志
+  return runInvariantCheckedTx((db) => {
     const updated = db.prepare(
       `UPDATE users SET balance = balance + ? WHERE id = ?`
     ).run(amount, user_id);
@@ -120,6 +121,15 @@ export function deposit({ user_id, amount, ip }) {
       note: 'simulated fiat rail',
     });
 
+    // Phase 3 (N1 落地)：deposit 审计日志写在事务内（事务提交则留存）
+    logAction({
+      actor_id: user_id,
+      action: 'deposit',
+      amount,
+      ip: ip ?? null,
+      db,
+    });
+
     // assertInvariant 在事务内调用——失败时整个 BEGIN IMMEDIATE 回滚
     // 不会出现 balance 变了但 reserve_balance 没变的半状态
     assertInvariant(db);
@@ -127,9 +137,6 @@ export function deposit({ user_id, amount, ip }) {
     const row = db.prepare(
       `SELECT balance FROM users WHERE id = ?`
     ).get(user_id);
-
-    // Phase 3 建好 audit_log 后补 auditService.logAction({action:'deposit', ...})
-    logger.info({ action: 'deposit', user_id, amount, ip: ip ?? null });
 
     return {
       deposited: amount,

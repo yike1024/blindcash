@@ -10,15 +10,17 @@
 // lazy-cleanup/deposit/redeem/payment）在 runImmediateTx 末尾调用
 // assertInvariant(db)。失败抛 ReserveInvariantError → 调用方事务回滚。
 //
-// N1 修正：audit_log Phase 3 才建，Phase 1 用 logger.error 兜底。
-// Phase 3 建好 audit_log 后，把 logger.error 改写为
-// auditService.logAction({action:'invariant_violation', ...})，并加测试。
+// N1 修正落地：Phase 3 建好 audit_log 后，invariant_violation 写入
+// audit_log。因为 invariant 违反发生在事务内（事务会回滚），所以
+// runInvariantCheckedTx 在 catch 块中（事务外）写入审计日志。
 //
 // 调用约定：assertInvariant 在调用方事务内调用（不是自己开事务），
 // 这样失败时调用方的 BEGIN IMMEDIATE 整体回滚，不会出现"reserve 变了
 // 但 SUM(balance) 没变"的半状态。
 
+import { runImmediateTx } from '../models/db.js';
 import { logger } from '../utils/logger.js';
+import { logAction } from './auditService.js';
 
 /**
  * Error thrown when the reserve invariant is violated. Callers inside a
@@ -70,12 +72,9 @@ export function assertInvariant(db) {
   const expected = sumBalance + (r.total_issued - r.total_redeemed) + inFlight;
 
   if (r.reserve_balance !== expected) {
-    // N1 修正：audit_log Phase 3 才建，Phase 1 用 logger.error 兜底
-    // Phase 3 建好 audit_log 后改写为 auditService.logAction({
-    //   action: 'invariant_violation',
-    //   reserve: r.reserve_balance, expected, sumBalance,
-    //   total_issued: r.total_issued, total_redeemed: r.total_redeemed, inFlight,
-    // })
+    // Phase 3 (N1 落地)：invariant_violation 审计日志由
+    // runInvariantCheckedTx 在事务回滚后的 catch 块中写入。
+    // 这里仍用 logger.error 兜底（persists to stderr even if audit write fails）。
     logger.error({
       msg: 'reserve invariant violated',
       reserve: r.reserve_balance,
@@ -96,6 +95,34 @@ export function assertInvariant(db) {
         inFlight,
       },
     );
+  }
+}
+
+/**
+ * Run a transaction with invariant checking + audit logging on failure.
+ *
+ * Wraps runImmediateTx. If assertInvariant throws ReserveInvariantError
+ * inside the tx, the tx rolls back, then this catch block writes an
+ * 'invariant_violation' audit log entry OUTSIDE the (now-rolled-back) tx.
+ *
+ * Phase 3 (N1 落地): replaces bare runImmediateTx in services that call
+ * assertInvariant (deposit, payment, withdrawal init/submit/reveal/cancel).
+ *
+ * @param {(db: import('better-sqlite3').Database) => any} fn
+ * @returns {any} whatever fn returns on commit
+ * @throws {ReserveInvariantError} if invariant violated (after audit log write)
+ */
+export function runInvariantCheckedTx(fn) {
+  try {
+    return runImmediateTx(fn);
+  } catch (e) {
+    if (e instanceof ReserveInvariantError) {
+      logAction({
+        action: 'invariant_violation',
+        meta: JSON.stringify(e.details ?? {}),
+      });
+    }
+    throw e;
   }
 }
 

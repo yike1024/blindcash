@@ -16,8 +16,8 @@
 // 调用约定：在 runMigrations 返回后 start，进程退出前 clearInterval。
 // 使用 handle.unref() 使 setInterval 不阻止进程退出（测试/脚本场景）。
 
-import { runImmediateTx } from '../models/db.js';
 import { refundAndClose } from './withdrawalService.js';
+import { runInvariantCheckedTx } from './bankReserveService.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -40,7 +40,7 @@ const CLEANUP_INTERVAL_MS = parseInt(
  * @returns {number} count of sessions refunded+closed
  */
 export function runGlobalCleanup() {
-  return runImmediateTx((db) => {
+  return runInvariantCheckedTx((db) => {
     const now = new Date().toISOString();
     const expired = db.prepare(
       `SELECT id, customer_id, amount FROM withdrawal_sessions

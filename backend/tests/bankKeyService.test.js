@@ -25,10 +25,13 @@ import {
   getPublicKey,
   getPrivateKey,
   getActivePublicKey,
+  getActiveKeyVersion,
   getPublicKeyByVersion,
+  rotateKey,
+  BankKeyError,
   _resetCacheForTest,
 } from '../src/services/bankKeyService.js';
-import { initSchema, getDb, closeDb, queryOne } from '../src/models/db.js';
+import { initSchema, getDb, closeDb, queryOne, runWrite } from '../src/models/db.js';
 import {
   G,
   n,
@@ -67,19 +70,26 @@ afterAll(() => {
   }
 });
 
-describe('M3 · bankKeyService — keypair persistence (singleton row id=1)', () => {
+describe('M3 · bankKeyService — keypair persistence (multi-key Phase 3)', () => {
   describe('getOrGenerate(): first boot generates + persists', () => {
-    it('creates exactly one row in bank_keys with id=1 on first call', () => {
+    it('creates exactly one row in bank_keys with key_version=1 on first call', () => {
       const kp = getOrGenerate();
 
       // The returned keypair should be the same one stored in the DB.
+      // Phase 3: private_key is now AES-256-GCM encrypted (60 bytes), not
+      // plaintext (32 bytes). We check public_key matches and private_key
+      // is NOT the plaintext (length ≠ 32).
       const row = queryOne(
-        'SELECT id, public_key, private_key FROM bank_keys',
+        'SELECT key_version, public_key, private_key, status FROM bank_keys',
       );
       expect(row).toBeDefined();
-      expect(row.id).toBe(1);
+      expect(row.key_version).toBe(1);
+      expect(row.status).toBe('active');
       expect(new Uint8Array(row.public_key)).toStrictEqual(kp.publicKey);
-      expect(new Uint8Array(row.private_key)).toStrictEqual(kp.privateKey);
+      // private_key in DB should be encrypted (60 bytes), NOT the raw 32-byte
+      // plaintext that getOrGenerate returns in memory.
+      expect(row.private_key.length).toBe(60);
+      expect(new Uint8Array(row.private_key)).not.toStrictEqual(kp.privateKey);
     });
 
     it('does NOT insert a second row on a second call (cache hit)', () => {
@@ -159,36 +169,112 @@ describe('M3 · bankKeyService — keypair persistence (singleton row id=1)', ()
   });
 
   // ────────────────────────────────────────────────────────────────────
-  // Phase 1 (v5 §二 H2 N4): multi-key rotation API stubs.
-  // Phase 1 has a single bank key (key_version=1, status='active'), so
-  // getActivePublicKey() and getPublicKeyByVersion(v) both return that same
-  // key regardless of v. Phase 3 will add multi-key lookup + validation.
+  // Phase 3 (v5 §三 3.1 + 3.2): multi-key rotation + AES at-rest encryption
   // ────────────────────────────────────────────────────────────────────
-  describe('Phase 1: multi-key rotation API stubs (single key)', () => {
-    it('getActivePublicKey() returns the same 33B as getPublicKey()', () => {
+  describe('Phase 3: AES-256-GCM at-rest encryption', () => {
+    it('DB private_key is 60-byte ciphertext (nonce+ct+tag), not 32-byte plaintext', () => {
       const kp = getOrGenerate();
-      const active = getActivePublicKey();
-      expect(active).toBeInstanceOf(Uint8Array);
-      expect(active.length).toBe(33);
-      expect(active).toStrictEqual(kp.publicKey);
-      expect(active).toStrictEqual(getPublicKey());
+      const row = queryOne('SELECT private_key FROM bank_keys WHERE status = ?',['active']);
+      expect(row).toBeDefined();
+      expect(row.private_key.length).toBe(60); // 12 + 32 + 16
+      expect(new Uint8Array(row.private_key)).not.toStrictEqual(kp.privateKey);
     });
 
-    it('getPublicKeyByVersion(1) returns the same key (Phase 1 single key)', () => {
+    it('getActiveKeyVersion() returns key_version=1 on first boot', () => {
+      getOrGenerate();
+      expect(getActiveKeyVersion()).toBe(1);
+    });
+  });
+
+  describe('Phase 3: getPublicKeyByVersion — real DB lookup', () => {
+    it('getPublicKeyByVersion(1) returns the same key as getActivePublicKey()', () => {
       const kp = getOrGenerate();
       const byV1 = getPublicKeyByVersion(1);
       expect(byV1).toBeInstanceOf(Uint8Array);
       expect(byV1.length).toBe(33);
       expect(byV1).toStrictEqual(kp.publicKey);
+      expect(byV1).toStrictEqual(getActivePublicKey());
     });
 
-    it('getPublicKeyByVersion(999) returns the same key (Phase 1 ignores v)', () => {
-      // Phase 1 has only one key, so any version arg resolves to that key.
-      // Phase 3 will enforce v ∈ {known key_versions} and throw on unknown.
-      const kp = getOrGenerate();
-      const byV999 = getPublicKeyByVersion(999);
-      expect(byV999).toStrictEqual(kp.publicKey);
-      expect(byV999).toStrictEqual(getActivePublicKey());
+    it('getPublicKeyByVersion(999) throws BankKeyError(404 KEY_NOT_FOUND)', () => {
+      getOrGenerate(); // ensure a key exists
+      expect(() => getPublicKeyByVersion(999)).toThrow(BankKeyError);
+      try {
+        getPublicKeyByVersion(999);
+        throw new Error('should have thrown');
+      } catch (e) {
+        expect(e.code).toBe('KEY_NOT_FOUND');
+        expect(e.status).toBe(404);
+      }
+    });
+  });
+
+  describe('Phase 3: rotateKey — key rotation with 90-day grace period', () => {
+    it('rotateKey marks old key retired + creates new active key_version', () => {
+      getOrGenerate(); // key_version=1
+      const result = rotateKey(null);
+      expect(result.old_version).toBe(1);
+      expect(result.new_version).toBe(2);
+
+      // Old key should be retired
+      const oldKey = queryOne(
+        'SELECT status, retired_until, retired_at FROM bank_keys WHERE key_version = 1',
+      );
+      expect(oldKey.status).toBe('retired');
+      expect(oldKey.retired_until).toBeTruthy();
+      expect(oldKey.retired_at).toBeTruthy();
+
+      // New key should be active
+      const newKey = queryOne(
+        'SELECT status, key_version FROM bank_keys WHERE key_version = 2',
+      );
+      expect(newKey.status).toBe('active');
+      expect(newKey.key_version).toBe(2);
+
+      // Active key version should now be 2
+      expect(getActiveKeyVersion()).toBe(2);
+    });
+
+    it('after rotation, old token (key_id=1) can still be verified (grace period)', () => {
+      const kp1 = getOrGenerate(); // v1
+      rotateKey(null); // → v2
+
+      // Old token with key_id=1 should still verify — getPublicKeyByVersion(1)
+      // returns the old public key (retired but within grace period).
+      _resetCacheForTest(); // force DB reload
+      const oldPub = getPublicKeyByVersion(1);
+      expect(oldPub).toStrictEqual(kp1.publicKey);
+    });
+
+    it('after rotation, new token uses key_id=2 (getActiveKeyVersion)', () => {
+      getOrGenerate(); // v1
+      rotateKey(null); // → v2
+      expect(getActiveKeyVersion()).toBe(2);
+
+      const activePub = getActivePublicKey();
+      const v2Pub = getPublicKeyByVersion(2);
+      expect(activePub).toStrictEqual(v2Pub);
+    });
+
+    it('retired_until expiry → getPublicKeyByVersion throws BankKeyError(403 KEY_RETIRED)', () => {
+      getOrGenerate(); // v1
+      rotateKey(null); // v1 retired
+
+      // Manually set retired_until to the past to simulate expiry
+      runWrite(
+        `UPDATE bank_keys SET retired_until = datetime('now','-1 day')
+         WHERE key_version = 1`,
+      );
+      _resetCacheForTest(); // clear version cache
+
+      expect(() => getPublicKeyByVersion(1)).toThrow(BankKeyError);
+      try {
+        getPublicKeyByVersion(1);
+        throw new Error('should have thrown');
+      } catch (e) {
+        expect(e.code).toBe('KEY_RETIRED');
+        expect(e.status).toBe(403);
+      }
     });
   });
 });

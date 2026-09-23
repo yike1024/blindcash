@@ -19,6 +19,7 @@ import bankRoutes from './routes/bank.js';
 import withdrawalRoutes from './routes/withdrawal.js';
 import paymentRoutes from './routes/payment.js';
 import transactionsRoutes from './routes/transactions.js';
+import adminRoutes from './routes/admin.js';
 
 // NOTE: blindcash uses port 4100 (NOT 4000) so it can run side-by-side with
 // the cryptobank project (which uses 4000). The Vite dev server runs on 5174
@@ -88,6 +89,9 @@ app.use('/api/payment', paymentRoutes);
 
 // Transactions routes (M7): GET /api/transactions — current user's ledger.
 app.use('/api/transactions', transactionsRoutes);
+
+// Admin routes (Phase 3): GET /api/admin/audit + POST /api/admin/rotate-key
+app.use('/api/admin', adminRoutes);
 
 // Only start the HTTP server when running as the main entry (not when
 // imported by test files — supertest creates its own server from app).

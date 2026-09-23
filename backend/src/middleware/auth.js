@@ -50,3 +50,27 @@ export function optionalAuth(req, res, next) {
   }
   next();
 }
+
+/**
+ * Phase 3 (v5 §三 3.3): requireAdmin middleware.
+ * Enforces that the authenticated user has role 'admin'.
+ * MUST run AFTER authenticateJWT (which sets req.user.role).
+ *
+ * This is a named, self-documenting alternative to requireRole('admin')
+ * for the admin audit routes. Returns 403 for non-admin users.
+ */
+export function requireAdmin(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: 'Authentication required',
+    });
+  }
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({
+      error: 'FORBIDDEN',
+      message: `Admin access required. You are '${req.user.role}'.`,
+    });
+  }
+  next();
+}
