@@ -1,0 +1,55 @@
+# .github/workflows/deploy.yml — Phase 5: 发布镜像
+#
+# v5 §三 5.2 落地：tag 触发，build 镜像 + push registry。
+# BC_MASTER_KEY 通过 GitHub Actions secrets 注入（不进镜像）。
+#
+# 使用：
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 前置：在 GitHub repo Settings → Secrets and variables → Actions 配置：
+#   - DOCKER_REGISTRY: 镜像仓库地址（如 ghcr.io/username/blindcash）
+#   - DOCKER_USERNAME: 仓库用户名
+#   - DOCKER_PASSWORD: 仓库 token/password
+#   - BC_MASTER_KEY: 32-byte hex（运行时注入，不进镜像）
+
+name: Deploy
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract tag
+        id: meta
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}:${{ steps.meta.outputs.tag }}
+            ${{ secrets.DOCKER_REGISTRY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

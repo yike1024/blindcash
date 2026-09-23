@@ -1,0 +1,628 @@
+openapi: 3.1.0
+info:
+  title: BlindCash API
+  version: 1.0.0
+  description: |
+    BlindCash — 基于 Chaum 盲签名的 eCash 系统 API。
+
+    **协议概述**（M2-M7）：
+    - 取款走 4-move cut-and-choose 盲签名协议：init → submit → reveal → cancel
+    - 支付走 token 兑付：POST /api/payment
+    - 银行公钥可公开获取：GET /api/bank/pubkey
+
+    **认证**：所有受保护接口需 `Authorization: Bearer <JWT>`。
+    JWT 由 /api/auth/register 或 /api/auth/login 返回。
+
+    **限流**（Phase 4）：
+    - 全局：100 req/min/IP
+    - 登录/注册：5 req/min/IP（防爆破）
+    - 取款/支付：10 req/min/user
+
+    **文献参考**：
+    - [1] D. Chaum, "Blind Signatures for Untraceable Payments", CRYPTO 1982
+    - [2] BIP-340 — Schnorr 签名（secp256k1）
+    - [3] NIST SP 800-57rev5 §8.3.4 — 密钥轮换 cryptoperiod
+
+servers:
+  - url: http://localhost:4100
+    description: 本地开发
+  - url: /
+    description: 相对路径（生产同源）
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          type: string
+          enum: [customer, merchant, admin]
+        balance:
+          type: integer
+          description: 用户余额（最小货币单位）
+    Token:
+      type: object
+      properties:
+        serial:
+          type: string
+          description: 64-hex 代币序列号
+        amount:
+          type: integer
+        R_prime:
+          type: string
+          description: 66-hex 压缩公钥（盲化后的承诺）
+        s_prime:
+          type: string
+          description: 64-hex 盲签名
+        key_id:
+          type: integer
+          description: 银行密钥版本号（token v2，可选）
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: 错误码
+        message:
+          type: string
+        req_id:
+          type: string
+          description: 请求 ID（Phase 4 错误响应带此值便于追溯）
+
+security: []
+
+paths:
+  /api/health:
+    get:
+      summary: 健康检查
+      description: 服务存活探针，不上业务限流。
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                  milestone:
+                    type: string
+
+  /api/auth/register:
+    post:
+      summary: 用户注册
+      description: |
+        注册新用户并立即返回 JWT。新用户 balance=0，需先充值才能取款。
+        限流：5 req/min/IP（authLimiter）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, role]
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                  maxLength: 32
+                  pattern: '^[a-zA-Z0-9_-]+$'
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  description: 须含字母、数字、特殊字符
+                role:
+                  type: string
+                  enum: [customer, merchant]
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  token:
+                    type: string
+        '400':
+          description: 校验失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 用户名已存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/login:
+    post:
+      summary: 用户登录
+      description: 限流：5 req/min/IP（authLimiter，防爆破）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  token:
+                    type: string
+        '401':
+          description: 凭据错误（统一消息防用户名枚举）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/bank/pubkey:
+    get:
+      summary: 获取银行公钥
+      description: |
+        返回当前 active 银行签名公钥 P = x·G（secp256k1 压缩格式，33 byte）。
+        无需认证——公钥是公开信息，任何人都可用来本地验证 token 签名。
+        密钥轮换后 key_id 会变化。
+      responses:
+        '200':
+          description: 公钥信息
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  public_key:
+                    type: string
+                    description: 66-hex 压缩公钥
+                  encoding:
+                    type: string
+                    example: secp256k1-compressed
+                  byte_length:
+                    type: integer
+                    example: 33
+                  key_id:
+                    type: integer
+                    description: 当前 active 密钥版本号
+
+  /api/bank/reserve:
+    get:
+      summary: 查银行准备金状态（admin）
+      security:
+        - bearerAuth: []
+      description: 管理员查看货币发行/回收/准备金状态。需 admin 角色。
+      responses:
+        '200':
+          description: 准备金数据
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_issued:
+                    type: integer
+                  total_redeemed:
+                    type: integer
+                  reserve_balance:
+                    type: integer
+                  in_flight:
+                    type: integer
+                    description: 在途取款金额
+                  sum_balance:
+                    type: integer
+                  updated_at:
+                    type: string
+        '401':
+          description: 未认证
+        '403':
+          description: 非 admin
+
+  /api/bank/deposit:
+    post:
+      summary: 充值（simulated fiat rail）
+      security:
+        - bearerAuth: []
+      description: |
+        自助充值：模拟外部法币入账。
+        单次上限 1000，24h 滚动累计上限 5000。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+                  maximum: 1000
+      responses:
+        '200':
+          description: 充值成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deposited:
+                    type: integer
+                  new_balance:
+                    type: integer
+        '400':
+          description: 金额无效
+
+  /api/bank/redeem:
+    post:
+      summary: 退币（兑付 token 到自己账户）
+      security:
+        - bearerAuth: []
+      description: |
+        用户将取款得到的 token 兑付到自己账户。
+        与 /api/payment 共享 spent_coins 表，同一 token 只能消费一次。
+        key_id 透传给 service 层用 getPublicKeyByVersion 查对应公钥验签。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serial, amount, R_prime, s_prime]
+              properties:
+                serial:
+                  type: string
+                amount:
+                  type: integer
+                R_prime:
+                  type: string
+                s_prime:
+                  type: string
+                key_id:
+                  type: integer
+      responses:
+        '200':
+          description: 兑付成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deposited:
+                    type: integer
+                  new_balance:
+                    type: integer
+        '400':
+          description: token 格式错误或签名无效
+        '409':
+          description: token 已被消费（双花）
+
+  /api/withdraw/init:
+    post:
+      summary: ① 取款 init
+      security:
+        - bearerAuth: []
+      description: |
+        开启取款会话。限流：10 req/min/user（txLimiter）。
+        4-move 协议第①步：扣余额 + 生成 N 个 k_i 承诺 R_i。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+      responses:
+        '201':
+          description: 会话创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  R:
+                    type: array
+                    items:
+                      type: string
+                  amount:
+                    type: integer
+                  N:
+                    type: integer
+                  ttl_ms:
+                    type: integer
+        '400':
+          description: 金额无效或余额不足
+        '409':
+          description: 已有进行中的取款会话
+
+  /api/withdraw/submit:
+    post:
+      summary: ③ 取款 submit
+      security:
+        - bearerAuth: []
+      description: |
+        提交 N 个盲化候选，银行随机选 j。
+        α/β 绝不能出现在 payload 中（API defense）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, candidates]
+              properties:
+                session_id:
+                  type: string
+                candidates:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      e:
+                        type: string
+                      R_prime:
+                        type: string
+                      serial:
+                        type: string
+      responses:
+        '200':
+          description: 银行选中 j
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  j:
+                    type: integer
+        '400':
+          description: payload 含 α/β 或校验失败
+
+  /api/withdraw/reveal:
+    post:
+      summary: ⑤ 取款 reveal + sign
+      security:
+        - bearerAuth: []
+      description: 用户揭示 i≠j 的盲化因子，银行校验后签名第 j 个候选。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, revealed]
+              properties:
+                session_id:
+                  type: string
+                revealed:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        '200':
+          description: 返回签名 s_j
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  s_j:
+                    type: string
+                  key_id:
+                    type: integer
+        '400':
+          description: 揭示校验失败（作弊）
+        '409':
+          description: 会话已提交过
+
+  /api/withdraw/cancel:
+    post:
+      summary: ⑦ 取款 cancel
+      security:
+        - bearerAuth: []
+      description: 取消取款会话，退还余额。committed 状态不可取消。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id:
+                  type: string
+      responses:
+        '200':
+          description: 取消成功，已退款
+        '400':
+          description: 会话已 committed 不可取消
+
+  /api/payment:
+    post:
+      summary: 支付（兑付 token 到收款方账户）
+      security:
+        - bearerAuth: []
+      description: |
+        将 token 兑付到当前登录用户账户。Chaum 式转账闭环——
+        任何已登录用户都可收款。限流：10 req/min/user（txLimiter）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serial, amount, R_prime, s_prime]
+              properties:
+                serial:
+                  type: string
+                amount:
+                  type: integer
+                R_prime:
+                  type: string
+                s_prime:
+                  type: string
+                key_id:
+                  type: integer
+      responses:
+        '200':
+          description: 支付成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deposited:
+                    type: integer
+                  new_balance:
+                    type: integer
+        '400':
+          description: 格式错误或签名无效
+        '401':
+          description: 未认证
+        '409':
+          description: token 已被消费（双花）
+
+  /api/transactions:
+    get:
+      summary: 查交易流水
+      security:
+        - bearerAuth: []
+      description: 当前登录用户的 withdraw/deposit/refund 流水。
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: 流水列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transactions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        kind:
+                          type: string
+                          enum: [deposit, withdraw, refund]
+                        amount:
+                          type: integer
+                        counterparty:
+                          type: string
+                        serial_hex:
+                          type: string
+                        session_id:
+                          type: string
+                        note:
+                          type: string
+                        created_at:
+                          type: string
+
+  /api/admin/audit:
+    get:
+      summary: 查审计日志（admin）
+      security:
+        - bearerAuth: []
+      description: 管理员分页查询 audit_log 表。需 admin 角色。
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: action
+          schema:
+            type: string
+          description: 按 action 过滤（如 deposit, withdraw, key_rotate）
+      responses:
+        '200':
+          description: 审计日志
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+        '403':
+          description: 非 admin
+
+  /api/admin/rotate-key:
+    post:
+      summary: 密钥轮换（admin）
+      security:
+        - bearerAuth: []
+      description: |
+        旧密钥标 retired + retired_until=now+90d，生成新 active 密钥。
+        需 admin 角色。
+      responses:
+        '200':
+          description: 轮换成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  old_version:
+                    type: integer
+                  new_version:
+                    type: integer
+        '403':
+          description: 非 admin

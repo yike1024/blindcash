@@ -1,0 +1,66 @@
+# .github/workflows/ci.yml — Phase 5: CI pipeline
+#
+# v5 §三 5.2 落地：push/PR 触发，跑 lint + test + build。
+#
+# 注意事项：
+#   - clientBuild.test.js 真实跑 `npx vite build`，Windows 开发机 → ubuntu CI
+#     的 spawn 行为差异：CI 用 ubuntu-latest，shell 默认 bash，无问题。
+#   - better-sqlite3 是 native 模块，ubuntu CI 需要 python3 + make + g++ 编译。
+#     ubuntu-latest 默认已含；若缺失加 apt install。
+#   - BC_MASTER_KEY 不设时 bankKeyService 生成 ephemeral key（logger.warn），
+#     测试正常通过。
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint-test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      # better-sqlite3 + bcrypt native 编译依赖（ubuntu-latest 通常已含，
+      # 显式安装做兜底）
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y python3 make g++
+
+      - name: Install backend deps
+        working-directory: backend
+        run: npm ci
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint (backend)
+        working-directory: backend
+        run: npx oxlint src tests
+
+      - name: Lint (frontend)
+        working-directory: frontend
+        run: npx oxlint src
+
+      - name: Test (backend)
+        working-directory: backend
+        env:
+          NODE_ENV: test
+        run: npm test
+
+      - name: Build (frontend)
+        working-directory: frontend
+        run: npm run build

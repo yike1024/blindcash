@@ -1,0 +1,46 @@
+# docker-compose.yml — Phase 5: 单服务部署（backend + volume）
+#
+# v5 §三 5.1 落地：
+#   - 单服务：backend express 同时托管 API + 前端 dist（不单独起 nginx）。
+#   - 数据持久化：volume 挂到 /app/backend/data，better-sqlite3 的 .db 文件
+#     写在这里，容器重建不丢数据。
+#   - 健康检查：curl /api/health，10s 间隔，3 次失败标 unhealthy。
+#   - BC_MASTER_KEY：生产必须从 secrets 注入；这里用 .env 或命令行覆盖。
+#
+# 使用：
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down
+#
+# 注意：BC_MASTER_KEY 不设会生成 ephemeral key（logger.warn），容器重启后
+# 密钥变了——所有已签发 token 失效。生产必须设固定的 32-byte hex。
+
+services:
+  blindcash:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: blindcash:latest
+    container_name: blindcash
+    restart: unless-stopped
+    ports:
+      - "4100:4100"
+    environment:
+      - NODE_ENV=production
+      - PORT=4100
+      - BC_DB_PATH=/app/backend/data/blindcash.db
+      # BC_MASTER_KEY: 32-byte hex string (64 chars). 生产必须设。
+      # 示例：BC_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      - BC_MASTER_KEY=${BC_MASTER_KEY:-}
+      - BC_LOG_LEVEL=info
+    volumes:
+      - blindcash_data:/app/backend/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  blindcash_data:
