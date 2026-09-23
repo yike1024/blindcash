@@ -96,9 +96,11 @@ describe('Phase 0 migration runner', () => {
   it('existing dev DB skips baseline execution and marks version=1', () => {
     const db = makeFreshDb();
 
-    // Simulate a legacy dev DB: users table already exists, built from the
-    // old schema.sql before migrationRunner existed. Add a sentinel column
-    // 'legacy_marker' so we can prove baseline did NOT replace the table.
+    // Simulate a legacy dev DB: users + transactions already exist, built from
+    // the old schema.sql before migrationRunner existed. Add a sentinel column
+    // 'legacy_marker' to users so we can prove baseline did NOT replace the table.
+    // transactions is needed because migration 009 (redeem_split CHECK) rebuilds
+    // it — if it doesn't exist, the SELECT FROM transactions fails.
     db.exec(`
       CREATE TABLE users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +113,18 @@ describe('Phase 0 migration runner', () => {
       );
       INSERT INTO users (username, password_hash, role, balance, legacy_marker)
         VALUES ('legacy_user', 'hash', 'customer', 100, 'pre-runner');
+      CREATE TABLE transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('withdraw','deposit','refund')),
+        amount INTEGER NOT NULL,
+        counterparty TEXT,
+        serial BLOB,
+        session_id TEXT,
+        note TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
     `);
 
     runMigrations(db, {
@@ -173,9 +187,11 @@ describe('Phase 0 migration runner', () => {
     // Phase 1: 002_bank_reserve.sql + 003_users_role_add_admin.sql now apply
     // successfully (migrationRunner fixed to handle explicit BEGIN/COMMIT).
     // Phase 3: 004_audit_log + 005_bank_keys_rebuild + 006_spent_coins_key_version
-    // also apply → total 6 migrations.
+    // Phase 6.1: 007_bank_keys_add_denomination + 008_add_denomination_to_sessions_and_spent_coins
+    // Phase 6.2: 009_transactions_add_redeem_split_kind
+    // also apply → total 9 migrations.
     const rowsAfterFirst = listAppliedMigrations(db);
-    expect(rowsAfterFirst.length).toBe(6);  // 001 baseline + 002 + 003 + 004 + 005 + 006
+    expect(rowsAfterFirst.length).toBe(9);  // 001-009
 
     // Run again — should be a no-op.
     runMigrations(db, {
@@ -184,8 +200,8 @@ describe('Phase 0 migration runner', () => {
       schemaMigrationsPath: REAL_SCHEMA_MIGRATIONS_DDL,
     });
     const rowsAfterSecond = listAppliedMigrations(db);
-    expect(rowsAfterSecond.length).toBe(6);  // still 6, no new migrations
-    expect(rowsAfterSecond[5].version).toBe(6);  // highest version is 006
+    expect(rowsAfterSecond.length).toBe(9);  // still 9, no new migrations
+    expect(rowsAfterSecond[8].version).toBe(9);  // highest version is 009
 
     // users table should still exist exactly once.
     const usersCount = db.prepare(`SELECT COUNT(*) as c FROM users`).get();
@@ -205,13 +221,13 @@ describe('Phase 0 migration runner', () => {
       schemaMigrationsPath: REAL_SCHEMA_MIGRATIONS_DDL,
     });
 
-    // Set up a temp migrations dir with a deliberately bad 007 migration.
-    // Phase 3: use 007 (not 004) because the first run already applied 001-006,
-    // so a 004_bad.sql would be skipped as "already applied".
+    // Set up a temp migrations dir with a deliberately bad 010 migration.
+    // Phase 6.2: use 010 (not 009) because the first run already applied 001-009,
+    // so a 009_bad.sql would be skipped as "already applied".
     const badMigrationsDir = join(DATA_DIR, `bad-migrations-${Date.now()}`);
     mkdirSync(badMigrationsDir, { recursive: true });
     writeFileSync(
-      join(badMigrationsDir, '007_bad.sql'),
+      join(badMigrationsDir, '010_bad.sql'),
       `CREATE TABLE migration_should_not_exist (id INTEGER);\nTHIS IS NOT VALID SQL;\n`,
     );
 
@@ -225,11 +241,11 @@ describe('Phase 0 migration runner', () => {
         })
       ).toThrow();
 
-      // version=7 must NOT be recorded (transaction rolled back).
-      const v7 = db.prepare(
-        `SELECT 1 FROM schema_migrations WHERE version = 7`
+      // version=10 must NOT be recorded (transaction rolled back).
+      const v10 = db.prepare(
+        `SELECT 1 FROM schema_migrations WHERE version = 10`
       ).get();
-      expect(v7).toBeUndefined();
+      expect(v10).toBeUndefined();
 
       // The partial table from the bad migration must NOT exist (rollback).
       const badTable = db.prepare(
@@ -260,14 +276,14 @@ describe('Phase 0 migration runner', () => {
       schemaMigrationsPath: REAL_SCHEMA_MIGRATIONS_DDL,
     });
 
-    // Set up a temp migrations dir with a 008 file (skipping 007 on purpose).
-    // Phase 3: use 008 (not 005) because the first run already applied 001-006,
-    // so a 005_gap_test.sql would be skipped as "already applied".
-    // The runner should warn about the gap (6→8, skipping 7) but still apply 008.
+    // Set up a temp migrations dir with a 011 file (skipping 010 on purpose).
+    // Phase 6.2: use 011 (not 010) because the first run already applied 001-009,
+    // so a 010_gap_test.sql would be skipped as "already applied".
+    // The runner should warn about the gap (9→11, skipping 10) but still apply 011.
     const gapMigrationsDir = join(DATA_DIR, `gap-migrations-${Date.now()}`);
     mkdirSync(gapMigrationsDir, { recursive: true });
     writeFileSync(
-      join(gapMigrationsDir, '008_gap_test.sql'),
+      join(gapMigrationsDir, '011_gap_test.sql'),
       `CREATE TABLE gap_test_table (id INTEGER PRIMARY KEY);\n`,
     );
 
@@ -283,19 +299,19 @@ describe('Phase 0 migration runner', () => {
         warn: warnSpy,
       });
 
-      // The gap warn should have fired for 008 (lastApplied=6, thisVersion=8).
+      // The gap warn should have fired for 011 (lastApplied=9, thisVersion=11).
       const gapWarn = warns.find(w => typeof w === 'object' && w.msg === 'gap in migration chain');
       expect(gapWarn).toBeDefined();
-      expect(gapWarn.file).toBe('008_gap_test.sql');
-      expect(gapWarn.lastApplied).toBe(6);
-      expect(gapWarn.thisVersion).toBe(8);
+      expect(gapWarn.file).toBe('011_gap_test.sql');
+      expect(gapWarn.lastApplied).toBe(9);
+      expect(gapWarn.thisVersion).toBe(11);
 
-      // 008 should still have been applied despite the gap warn.
-      const v8 = db.prepare(
-        `SELECT version, name FROM schema_migrations WHERE version = 8`
+      // 011 should still have been applied despite the gap warn.
+      const v11 = db.prepare(
+        `SELECT version, name FROM schema_migrations WHERE version = 11`
       ).get();
-      expect(v8).toBeDefined();
-      expect(v8.name).toBe('008_gap_test');
+      expect(v11).toBeDefined();
+      expect(v11.name).toBe('011_gap_test');
 
       // The gap_test_table should exist.
       const table = db.prepare(

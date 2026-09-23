@@ -6,16 +6,21 @@
 //   网络超时/失败 → token 保留。409 DOUBLE_SPEND 时也自动删除（审查建议 3：
 //   409 = 服务端替你确认了它已花费）。
 // Phase 2 §2.4: 支持扫码——离线模式 <input type=file> + jsQR 解码。
+// Phase 6.4: 离线支付重试——网络故障时将支付暂存到 IndexedDB
+//   pending_payments store，用户可手动重试。仅在可重试错误（无 response
+//   = 网络中断，或 5xx 服务器错误）时暂存；4xx 永久错误（SIGNATURE_INVALID、
+//   MALFORMED_TOKEN）不暂存。409 DOUBLE_SPEND 确认已花费，从 pending 和
+//   wallet 双删。
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Input, Alert, Button, Space, Typography, Descriptions, Tag,
-  message, Result, Spin, Collapse, Radio, Select, Upload,
+  message, Result, Spin, Collapse, Radio, Select, Upload, Badge,
 } from 'antd';
 import {
   CheckCircleTwoTone, CloseCircleTwoTone, CopyOutlined, ThunderboltOutlined,
-  ScanOutlined, WalletOutlined,
+  ScanOutlined, WalletOutlined, ReloadOutlined, ClockCircleOutlined,
 } from '@ant-design/icons';
 import jsQR from 'jsqr';
 
@@ -24,7 +29,11 @@ import api from '../api/client.js';
 import { verifySig } from '@crypto/client/schnorrBlindClient.js';
 import { isValidCompressedFormat } from '@crypto/client/pointFormat.js';
 import { hexToBytes } from '@utils/hex.js';
-import { listCoins, getCoin, deleteCoin } from '../utils/walletDB.js';
+import {
+  listCoins, getCoin, deleteCoin,
+  addPendingPayment, listPendingPayments, deletePendingPayment,
+  updatePendingPaymentAttempt,
+} from '../utils/walletDB.js';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -88,6 +97,8 @@ export default function PaymentPage() {
   const [lastToken, setLastToken] = useState(null);
   const [walletCoins, setWalletCoins] = useState([]);
   const [selectedSerial, setSelectedSerial] = useState(null);
+  const [pendingPays, setPendingPays] = useState([]);
+  const [retryingId, setRetryingId] = useState(null);
 
   // Load bank public key for local pre-verify
   useEffect(() => {
@@ -115,6 +126,20 @@ export default function PaymentPage() {
       message.error(`加载钱包失败：${e.message}`);
     }
   }, []);
+
+  // Phase 6.4: Load pending payments on mount + after submit/retry
+  const loadPending = useCallback(async () => {
+    try {
+      const pending = await listPendingPayments();
+      setPendingPays(pending);
+    } catch (e) {
+      message.error(`加载待重试支付失败：${e.message}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPending();
+  }, [loadPending]);
 
   useEffect(() => {
     if (inputMode === 'wallet') {
@@ -246,15 +271,40 @@ export default function PaymentPage() {
       message.success(`收款成功：+${data.deposited}`);
     } catch (e) {
       const code = e?.response?.data?.error;
+      const status = e?.response?.status;
+
       // 审查建议 3：409 = 服务端确认已花费，自动从钱包删除
       if (code === 'DOUBLE_SPEND') {
         await removeFromWalletIfExists(preview.token.serial);
+        setResult({
+          kind: 'error',
+          msg: '双花检测：此 token 已被花费过（serial 已在 spent_coins 表中）。',
+        });
+        return;
       }
+
+      // Phase 6.4: 网络故障或 5xx 服务器错误 → 暂存到 pending_payments
+      // 可重试条件：无 response（axios 网络错误）或 status >= 500 或 429
+      const isRetryable = !e.response || (status >= 500 && status < 600) || status === 429;
+      if (isRetryable) {
+        const errMsg = e.response
+          ? `服务器错误 ${status}：${e.response.data?.message ?? e.message}`
+          : `网络错误：${e.message ?? '无法连接服务器'}`;
+        await addPendingPayment(preview.token, errMsg);
+        await loadPending();
+        setResult({
+          kind: 'pending',
+          msg: `网络故障，支付已暂存（${errMsg}）。请在下方"待重试支付"区手动重试。`,
+        });
+        message.warning('支付已暂存，待网络恢复后重试');
+        return;
+      }
+
       setResult({ kind: 'error', msg: mapApiError(e, '收款失败') });
     } finally {
       setSubmitting(false);
     }
-  }, [preview, updateUser, removeFromWalletIfExists]);
+  }, [preview, updateUser, removeFromWalletIfExists, loadPending]);
 
   const handleResubmit = useCallback(async () => {
     if (!lastToken) return;
@@ -280,6 +330,76 @@ export default function PaymentPage() {
       setSubmitting(false);
     }
   }, [lastToken, removeFromWalletIfExists]);
+
+  // Phase 6.4: Retry a pending payment. Re-submit the stored token to /payment.
+  // On success (200): delete from pending + wallet, update balance.
+  // On 409 DOUBLE_SPEND: delete from pending + wallet (confirmed spent).
+  // On 4xx permanent error (MALFORMED/SIGNATURE): delete from pending (no retry value).
+  // On network/5xx: increment attempts + update last_error, keep pending.
+  const handleRetryPending = useCallback(async (pendingId) => {
+    setRetryingId(pendingId);
+    try {
+      const pending = pendingPays.find((p) => p.id === pendingId);
+      if (!pending) {
+        message.error('待重试支付不存在');
+        return;
+      }
+      const token = pending.token;
+      const { data } = await api.post('/payment', token);
+      // Success → delete from pending + wallet, update balance
+      updateUser({ balance: data.new_balance });
+      await deletePendingPayment(pendingId);
+      await removeFromWalletIfExists(token.serial);
+      await loadPending();
+      setResult({
+        kind: 'success',
+        msg: `重试成功：已收款 ${data.deposited}`,
+        deposited: data.deposited,
+        new_balance: data.new_balance,
+      });
+      message.success(`重试成功：+${data.deposited}`);
+    } catch (e) {
+      const code = e?.response?.data?.error;
+      const status = e?.response?.status;
+
+      if (code === 'DOUBLE_SPEND') {
+        // Token already spent — confirmed by server, no point retrying
+        await deletePendingPayment(pendingId);
+        await removeFromWalletIfExists(
+          pendingPays.find((p) => p.id === pendingId)?.token?.serial,
+        );
+        await loadPending();
+        message.info('此 token 已被花费，从待重试列表移除');
+        return;
+      }
+
+      // Permanent 4xx errors (except 429 rate-limit) → remove from pending
+      const isPermanent = e.response && status >= 400 && status < 500 && status !== 429;
+      if (isPermanent) {
+        await deletePendingPayment(pendingId);
+        await loadPending();
+        message.error(`永久错误 ${status}，已从待重试列表移除：${e.response.data?.message ?? e.message}`);
+        return;
+      }
+
+      // Network/5xx → increment attempts, keep pending
+      const errMsg = e.response
+        ? `服务器错误 ${status}：${e.response.data?.message ?? e.message}`
+        : `网络错误：${e.message ?? '无法连接服务器'}`;
+      await updatePendingPaymentAttempt(pendingId, errMsg);
+      await loadPending();
+      message.warning(`重试失败：${errMsg}`);
+    } finally {
+      setRetryingId(null);
+    }
+  }, [pendingPays, updateUser, removeFromWalletIfExists, loadPending]);
+
+  // Phase 6.4: Discard a pending payment (user gives up)
+  const handleDiscardPending = useCallback(async (pendingId) => {
+    await deletePendingPayment(pendingId);
+    await loadPending();
+    message.info('已移除待重试支付');
+  }, [loadPending]);
 
   async function copyToken() {
     if (!preview.token) return;
@@ -541,6 +661,21 @@ export default function PaymentPage() {
                 </Space>
               }
             />
+          ) : result.kind === 'pending' ? (
+            <Result
+              status="warning"
+              icon={<ClockCircleOutlined />}
+              title="支付已暂存"
+              subTitle={result.msg}
+              extra={
+                <Alert
+                  type="info"
+                  showIcon
+                  message="离线支付重试"
+                  description="Token 仍在钱包中未被消费。网络恢复后可在下方「待重试支付」区手动重试，或关闭页面稍后回来——pending 记录持久化在 IndexedDB。"
+                />
+              }
+            />
           ) : (
             <Result
               status={result.isDoubleSpend ? 'info' : 'error'}
@@ -567,6 +702,73 @@ export default function PaymentPage() {
               }
             />
           )}
+        </section>
+      )}
+
+      {/* ── Phase 6.4: 待重试支付 ── */}
+      {pendingPays.length > 0 && (
+        <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
+            <Badge count={pendingPays.length} style={{ backgroundColor: '#fa8c16' }} />
+            <h2 className="bc-display" style={{ fontSize: 22, margin: 0 }}>待重试支付</h2>
+          </div>
+          <Alert
+            type="warning"
+            showIcon
+            message="以下支付因网络故障暂存，请手动重试"
+            description="网络恢复后点击「重试」重新提交。如果服务器返回 409（已花费）或 4xx（永久错误），将自动从列表移除。"
+            style={{ marginBottom: 18 }}
+          />
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            {pendingPays.map((p) => (
+              <div
+                key={p.id}
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: '14px 18px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 16,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ minWidth: 200, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <Text strong style={{ fontSize: 16 }}>{p.token.amount}</Text>
+                    <span className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.1em' }}>BC</span>
+                    <Tag color="orange">尝试 {p.attempts ?? 0} 次</Tag>
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 12 }} className="bc-mono">
+                    {p.token.serial.slice(0, 16)}…{p.token.serial.slice(-8)}
+                  </Text>
+                  {p.last_error && (
+                    <div style={{ marginTop: 6 }}>
+                      <Text type="danger" style={{ fontSize: 11 }}>{p.last_error}</Text>
+                    </div>
+                  )}
+                </div>
+                <Space>
+                  <Button
+                    type="primary"
+                    icon={<ReloadOutlined />}
+                    loading={retryingId === p.id}
+                    onClick={() => handleRetryPending(p.id)}
+                  >
+                    重试
+                  </Button>
+                  <Button
+                    danger
+                    onClick={() => handleDiscardPending(p.id)}
+                    disabled={retryingId === p.id}
+                  >
+                    丢弃
+                  </Button>
+                </Space>
+              </div>
+            ))}
+          </Space>
         </section>
       )}
 

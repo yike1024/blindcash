@@ -118,11 +118,42 @@
    - 答辩话术：盲签名协议的安全假设是"签名密钥不泄露"；密钥保护是另一门课
      （密钥管理 / HSM / TEE）的主题，本课程不展开。
 
+   **Phase 6.1 扩展：多面额密钥结构（v6 §四 6.1）**
+   - `bank_keys` 表已从 Phase 0 的 `CHECK(id=1)` 单行表重建为多行表
+     （迁移 005 去掉 `CHECK(id=1)`，支持密钥轮换；迁移 007 增加 `denomination` 列）。
+   - 面额集合 `DENOMINATIONS = [1, 5, 10, 50, 100]`（`backend/src/config/bank.js`），
+     不同面额用独立签名密钥——这是 Phase 6.3 匿名集按面额分组的前提。
+   - **每个 `(denomination, status='active')` 对最多一把密钥**：迁移 007 的
+     partial unique index `idx_bk_active_denom ON bank_keys(denomination) WHERE status = 'active'`
+     在 DB 层铁律保证。密钥轮换时旧密钥先 `status='retired'`（脱离 partial index范围）
+     再 INSERT 新 `status='active'` 行，两步不冲突。
+   - 取款时按面额选 denom，从 `GET /api/bank/pubkeys` 拿对应 denom 的公钥 P 计算盲化承诺；
+     token v2 schema 的 `key_id` 对应 `bank_keys.key_version`，支付/退币时反查公钥验签。
+
+   **Phase 6 迁移引入的新列/新约束（007/008/009）**
+   - 迁移 008：`withdrawal_sessions.denomination`（reveal 时按 session 行的 denom 选签名密钥）、
+     `spent_coins.denomination`（6.3 匿名集按 `(denomination, key_version)` 分组统计）。
+     两列均 `DEFAULT 1` 前向兼容旧数据。
+   - 迁移 009：`transactions.kind` CHECK 约束扩展为
+     `('withdraw','deposit','refund','redeem_split')`，支撑 Phase 6.2 找零兑付流水
+     （`/api/bank/redeem-split` 写 `kind='redeem_split'`，与商户收款 `deposit` 区分）。
+   - Phase 6.4：`pending_payments` 是**客户端 IndexedDB 状态**，不落服务端 DB，
+     不影响任何服务端不变量。客户端钱包在浏览器本地维护待支付队列，提交时才
+     调 `/api/payment` 落 `spent_coins`——服务端双花检测不变量 6 不变。
+
 **落地证据**：
 
 - 实现位置：
-  - `backend/src/models/schema.sql` —— `bank_keys` 表 `CHECK(id = 1)` singleton + 注释明示 "⚠ 教学演示用：私钥明文存 DB"
-  - `backend/src/services/bankKeyService.js` —— `getOrGenerate()` 启动时从 DB 读取或生成；`assertKeypairConsistent()` 自检 P == x·G
+  - `backend/src/models/schema.sql` —— baseline `bank_keys` 仍保留 `CHECK(id=1)` 注释作为
+    教学起点；实际生产 schema 由迁移 005 重建为多行表（`key_version` UNIQUE + `status` + `retired_until`）
+  - `backend/src/models/migrations/005_bank_keys_rebuild.sql` —— 去掉 `CHECK(id=1)`，重建为多行表
+  - `backend/src/models/migrations/007_bank_keys_add_denomination.sql` —— `denomination` 列 + `idx_bk_active_denom` partial unique index
+  - `backend/src/models/migrations/008_add_denomination_to_sessions_and_spent_coins.sql` —— `withdrawal_sessions.denomination` + `spent_coins.denomination`
+  - `backend/src/models/migrations/009_transactions_add_redeem_split_kind.sql` —— `transactions.kind` CHECK 扩展 `redeem_split`
+  - `backend/src/config/bank.js` —— `DENOMINATIONS = [1, 5, 10, 50, 100]` 常量 + 不变量 7 扩展注释
+  - `backend/src/services/bankKeyService.js` —— `getActivePublicKeyByDenom(denom)` / `getActiveKeyVersionByDenom(denom)` / `getDenominationByVersion(key_version)` 按面额路由；`assertKeypairConsistent()` 自检 P == x·G
+  - `backend/src/routes/bank.js` —— `GET /api/bank/pubkeys` 返回所有面额 active 公钥映射；`POST /api/bank/redeem-split` Phase 6.2 找零兑付
+  - `backend/src/services/paymentService.js` —— `redeemSplit()` INSERT spent_coins 时 `denomination` 列用 `split_denomination`（教学化标记）
   - 任何测试用例**均未**通过读 `bank_keys.private_key` 伪造签名来"证明"任何事
 - 测试覆盖：
   - `bankKeyService.test.js`（12 用例）：singleton 行、第二次启动读取同密钥、公钥格式 + 自一致性、`/api/bank/pubkey` 端点无认证可访问

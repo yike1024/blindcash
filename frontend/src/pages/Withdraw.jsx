@@ -20,7 +20,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Steps, Form, InputNumber, Button, Alert, Space, Typography,
-  Descriptions, message, Result, Spin, Input,
+  Descriptions, message, Result, Spin, Input, Radio,
 } from 'antd';
 import { CopyOutlined, LockOutlined, WalletOutlined } from '@ant-design/icons';
 
@@ -105,6 +105,7 @@ export default function WithdrawPage() {
 
   const [step, setStep] = useState(0);
   const [amount, setAmount] = useState(null);
+  const [denomination, setDenomination] = useState(1);
 
   const [session, setSession] = useState(null);
   const [jIndex, setJIndex] = useState(null);
@@ -155,11 +156,18 @@ export default function WithdrawPage() {
       if (amount > (user?.balance ?? 0)) {
         throw Object.assign(new Error('balance'), { response: { data: { error: 'INSUFFICIENT_BALANCE' } } });
       }
-      const pubRes = await api.get('/bank/pubkey');
-      const publicKeyHex = pubRes.data.public_key;
+      const pubRes = await api.get('/bank/pubkeys');
+      // Phase 6.1: 按面额选公钥——不同面额用不同密钥
+      const pubKeyData = pubRes.data.denominations[String(denomination)];
+      if (!pubKeyData) {
+        throw Object.assign(new Error('denom'), {
+          response: { data: { error: 'INVALID_DENOMINATION', message: `no active key for denom ${denomination}` } },
+        });
+      }
+      const publicKeyHex = pubKeyData.public_key;
       const publicKey = hexToBytes(publicKeyHex);
 
-      const { data } = await api.post('/withdraw/init', { amount });
+      const { data } = await api.post('/withdraw/init', { amount, denomination });
       const expires_at = new Date(Date.now() + data.ttl_ms).toISOString();
       const newSession = {
         session_id: data.session_id,
@@ -169,6 +177,8 @@ export default function WithdrawPage() {
         publicKeyHex,
         publicKey,
         expires_at,
+        key_id: data.key_id,
+        denomination,
       };
       setSession(newSession);
       sessionActiveRef.current = true;
@@ -181,7 +191,7 @@ export default function WithdrawPage() {
       setLoading(false);
       setLoadingLabel('');
     }
-  }, [amount, user, updateUser]);
+  }, [amount, denomination, user, updateUser]);
 
   // ────────────────────────────────────────────────────────────────────
   // ② clientBuildCandidates + submit
@@ -258,11 +268,13 @@ export default function WithdrawPage() {
       const finalToken = {
         // Phase 1 (v5 §三 1.7 token v2 schema)：含 v:2 与 key_id 字段。
         // key_id 来自 reveal 步骤后端返回（revealAndSign 返回
-        // {s_j, key_id:1}）；缺省时 fallback 到 1（Phase 1 单密钥）。
+        // {s_j, key_id}）；缺省时 fallback 到 session.key_id 或 1。
         // 支付/退币时把 key_id 透传给 processPayment，由它走
         // getPublicKeyByVersion(key_id) 验签——Phase 3 多密钥轮换铺路。
+        // Phase 6.1: 加 denomination 字段（前端展示用，服务端从 key_id 反查）。
         v: 2,
-        key_id: data.key_id ?? 1,
+        key_id: data.key_id ?? session.key_id ?? 1,
+        denomination: session.denomination ?? 1,
         serial: candJ.serial,
         amount: session.amount,
         R_prime: candJ.R_prime,
@@ -290,6 +302,7 @@ export default function WithdrawPage() {
     setSavedToWallet(false);
     setStep(0);
     setAmount(null);
+    setDenomination(1);
     blindersRef.current = [];
     candidatesRef.current = [];
     sessionActiveRef.current = false;
@@ -449,6 +462,20 @@ export default function WithdrawPage() {
           </p>
           {error && <Alert message={error} type="error" showIcon closable onClose={() => setError(null)} style={{ marginBottom: 16 }} />}
           <Form layout="vertical" autoComplete="off" requiredMark={false}>
+            <Form.Item label="面额" extra="不同面额使用不同签名密钥（Phase 6.1 多面额密钥）">
+              <Radio.Group
+                value={denomination}
+                onChange={(e) => setDenomination(e.target.value)}
+                optionType="button"
+                buttonStyle="solid"
+              >
+                <Radio.Button value={1}>1 BC</Radio.Button>
+                <Radio.Button value={5}>5 BC</Radio.Button>
+                <Radio.Button value={10}>10 BC</Radio.Button>
+                <Radio.Button value={50}>50 BC</Radio.Button>
+                <Radio.Button value={100}>100 BC</Radio.Button>
+              </Radio.Group>
+            </Form.Item>
             <Form.Item
               label="取款金额"
               extra={`当前余额：${user?.balance ?? 0}（顾客初始 100）`}
@@ -545,6 +572,7 @@ export default function WithdrawPage() {
           />
           <Descriptions column={1} bordered size="small">
             <Descriptions.Item label="serial (32B)"><Text code copyable style={{ fontSize: 12 }}>{token.serial}</Text></Descriptions.Item>
+            <Descriptions.Item label="面额"><Text strong>{token.denomination} BC</Text></Descriptions.Item>
             <Descriptions.Item label="amount"><Text strong>{token.amount}</Text></Descriptions.Item>
             <Descriptions.Item label="R_prime (33B)"><Text code copyable style={{ fontSize: 12 }}>{token.R_prime}</Text></Descriptions.Item>
             <Descriptions.Item label="s_prime (32B)"><Text code copyable style={{ fontSize: 12 }}>{token.s_prime}</Text></Descriptions.Item>

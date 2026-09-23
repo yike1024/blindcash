@@ -33,11 +33,14 @@ router.get('/audit', authenticateJWT, requireRole('admin'), (req, res) => {
 });
 
 // POST /api/admin/rotate-key — 触发密钥轮换
+// Phase 6.1: 支持 denomination 参数（轮换特定面额的密钥）。
+//   body: { denomination?: number } — 缺省 1
 // 旧密钥标记 retired + retired_until=now+90d，生成新 active 密钥。
-// 返回新旧 key_version。
+// 返回新旧 key_version + denomination。
 router.post('/rotate-key', authenticateJWT, requireRole('admin'), (req, res) => {
   try {
-    const result = rotateKey(req.user.userId);
+    const denomination = req.body?.denomination ?? 1;
+    const result = rotateKey(denomination, req.user.userId);
     return res.json(result);
   } catch (err) {
     return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });

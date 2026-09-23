@@ -32,7 +32,8 @@
 //          double-spend defense in depth.
 
 import { createHash } from 'node:crypto';
-import { getActivePublicKey, getPublicKeyByVersion, getActiveKeyVersion, BankKeyError } from './bankKeyService.js';
+import { getActivePublicKey, getPublicKeyByVersion, getActiveKeyVersion, getDenominationByVersion, BankKeyError } from './bankKeyService.js';
+import { DENOMINATIONS } from '../config/bank.js';
 import { verifySig } from '../crypto/server/schnorrBlind.js';
 import { n, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { hexToBytes } from '../utils/hex.js';
@@ -236,6 +237,10 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
     // 这枚 token 是用哪个 key_version 签发的。key_id 缺省时用当前 active
     // key_version（前向兼容旧 token 路径）。
     const keyVersion = (key_id != null) ? key_id : getActiveKeyVersion();
+    // Phase 6.1: 从 key_id 反查 denomination，记录到 spent_coins 用于
+    // 6.3 匿名集分析（按 denom + key_version 分组统计）。
+    // key_id 缺省时（旧 token 路径）denom=1。
+    const denomination = (key_id != null) ? getDenominationByVersion(key_id) : 1;
 
     // Insert spent_coins row. idx_sc_token_hash UNIQUE is the belt-and-suspenders
     // guard for the corner case where two different serials produce the same
@@ -243,14 +248,15 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
     // index makes it a DB-level invariant — see schema.sql comment).
     try {
       db.prepare(
-        `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash, key_version)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash, key_version, denomination)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         Buffer.from(serialBytes),
         amount,
         merchant_id,
         Buffer.from(tokenHash),
         keyVersion,
+        denomination,
       );
     } catch (e) {
       // UNIQUE violation on token_hash (different serial, same (R', s')).
@@ -311,5 +317,205 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
     }
 
     return { deposited: amount, new_balance: row.balance };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 6.2: redeem-split — 部分取款 / 找零兑付（教学化简化方案）
+// ─────────────────────────────────────────────────────────────────────
+//
+// v6 §四 6.2 落地：用户持有大面额 token（如 50 BC），希望拆成更小面额
+// 的零钱使用。Chaum 协议下真正的"找零"需要银行发行新 token，必须走完整
+// 4-move 取款流程——不存在"原 token 切一刀"的简单拆分。
+//
+// 本接口的简化语义：
+//   1. 验证原 token（formatGate + verifySig）
+//   2. 校验 amount 能被 split_denomination 整除（否则拆分不对齐）
+//   3. 原子事务：
+//      - INSERT spent_coins（denomination 列 = split_denomination，教学化
+//        标记"这笔兑付在概念上等价于 amount/split_denomination 枚小币"）
+//      - UPDATE users.balance += amount（全额退到账户）
+//      - recordTransaction(kind='redeem_split', note=split 信息)
+//      - assertInvariant
+//   4. 用户随后可另走 4-move 取款流程取 split_denomination 面额的新 token
+//
+// **隐私局限（必须文档化，见 limitations 数组）**：
+//   1. 这不是真正的 Chaum 找零——银行把大额 token 全额退到账户，
+//      用户需另走 4-move 取款获得新面额 token。
+//   2. spent_coins 按 split_denomination 记账仅是教学展示，不改变 Chaum
+//      协议语义；实际生产系统的找零协议需商户侧协议（如 Brands' fair
+//      cash [1]），本系统不实现。
+//   3. 银行可观察到"大额兑付 + 后续小额取款"模式，存在时间侧信道——
+//      攻击者可借此缩小匿名集（参考 Chaum 1985 [2] §"Privacy"）。
+//   4. 真正的找零协议会让商户参与：顾客给 50 BC token 购 30 BC 商品，
+//      商户找 20 BC token；本系统不实现商户侧找零协议，简化教学。
+//
+// 文献参考：
+//   [1] Brands S. 1993. "Untraceable Off-Line Cash in Wallets with Observers".
+//       Crypto'93. §3 — 钱包观察者协议，让商户侧参与找零的早期方案。
+//   [2] Chaum D. 1985. "Security Without Identification: Transaction Systems
+//       to Make Big Brother Obsolete". CACM 28(10). §"Privacy" — 时间侧信道
+//       对匿名集的削弱，本接口的 limitations[2] 即此警告。
+
+/**
+ * Limitations documentation returned to the client for transparency.
+ * Routes layer passes this through to the response body so the frontend
+ * can honestly display them next to the action.
+ */
+export const REDEEM_SPLIT_LIMITATIONS = [
+  '这不是真正的 Chaum 找零——银行把大额 token 全额退到账户，用户需另走 4-move 取款获得新面额 token。',
+  'spent_coins 按 split_denomination 记账仅是教学展示，不改变 Chaum 协议语义；生产系统找零需商户侧协议（如 Brands 1993 钱包观察者方案）。',
+  '银行可观察「大额兑付 + 后续小额取款」模式，存在时间侧信道——攻击者可借此缩小匿名集（参考 Chaum 1985）。',
+];
+
+/**
+ * Redeem a large-denomination token by crediting the full amount to the
+ * user's balance and recording the spend under the requested split
+ * denomination (teaching-only: does NOT issue new tokens).
+ *
+ * @param {{
+ *   user_id:number,
+ *   serial:string, amount:number, R_prime:string, s_prime:string, key_id?:number,
+ *   split_denomination:number,
+ * }} args
+ * @returns {{deposited:number, new_balance:number, split_denomination:number, split_count:number, limitations:string[]}}
+ * @throws {PaymentError} 400 MALFORMED_TOKEN / 400 SIGNATURE_INVALID / 400 INVALID_SPLIT_DENOMINATION /
+ *         400 SPLIT_NOT_DIVISIBLE / 409 DOUBLE_SPEND
+ */
+export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id, split_denomination }) {
+  // 1. Validate split_denomination ∈ DENOMINATIONS
+  if (!Number.isInteger(split_denomination) || !DENOMINATIONS.includes(split_denomination)) {
+    throw new PaymentError(400, 'INVALID_SPLIT_DENOMINATION',
+      `split_denomination must be one of ${DENOMINATIONS.join(', ')}`);
+  }
+
+  // 2. Format gate (H1: reject malformed before curve operations)
+  const { serialBytes, RPrimeBytes, sPrimeBytes, sPrime } = formatGate({
+    serial,
+    amount,
+    R_prime,
+    s_prime,
+  });
+
+  // 3. Verify signature (OUTSIDE transaction — read-only curve math)
+  let publicKey;
+  try {
+    publicKey = (key_id != null)
+      ? getPublicKeyByVersion(key_id)
+      : getActivePublicKey();
+  } catch (e) {
+    if (e instanceof BankKeyError) {
+      throw new PaymentError(e.status, e.code, e.message);
+    }
+    throw e;
+  }
+  const ok = verifySig(RPrimeBytes, sPrime, serialBytes, amount, publicKey);
+  if (!ok) {
+    throw new PaymentError(400, 'SIGNATURE_INVALID',
+      'signature verification failed — token is forged or tampered');
+  }
+
+  // 4. Split divisibility check (teaching: amount must be a multiple of
+  //    split_denomination so the conceptual "split into N small coins" is
+  //    well-formed; otherwise the requested split is meaningless).
+  if (amount % split_denomination !== 0) {
+    throw new PaymentError(400, 'SPLIT_NOT_DIVISIBLE',
+      `amount (${amount}) must be divisible by split_denomination (${split_denomination})`);
+  }
+  const splitCount = amount / split_denomination;
+
+  // 5. token_hash (H2: bytes-level concat to prevent casing ambiguity)
+  const tokenHash = computeTokenHash(serialBytes, RPrimeBytes, sPrimeBytes);
+
+  // 6. Atomic deposit (BEGIN IMMEDIATE holds the write lock).
+  return runInvariantCheckedTx((db) => {
+    // Primary double-spend guard
+    const existing = db.prepare(
+      `SELECT 1 FROM spent_coins WHERE serial = ?`,
+    ).get(Buffer.from(serialBytes));
+    if (existing) {
+      throw new PaymentError(409, 'DOUBLE_SPEND',
+        'this token has already been spent');
+    }
+
+    // Phase 6.2 教学化：INSERT spent_coins 时 denomination 列用
+    // split_denomination 而非原 key_id 反查的 denom——直观展示"这笔兑付
+    // 等价于 split_count 枚小币"。key_version 仍按原 token 的 key_id 记录
+    // （用于 6.3 匿名集分析按 (denom, key_version) 分组统计）。
+    const keyVersion = (key_id != null) ? key_id : getActiveKeyVersion();
+
+    try {
+      db.prepare(
+        `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash, key_version, denomination)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        Buffer.from(serialBytes),
+        amount,
+        user_id,
+        Buffer.from(tokenHash),
+        keyVersion,
+        split_denomination,  // ← 教学化：用 split_denomination 而非原 denom
+      );
+    } catch (e) {
+      if (e.message && e.message.includes('UNIQUE')) {
+        throw new PaymentError(409, 'DOUBLE_SPEND',
+          "token_hash collision — same (R', s') already spent under a different serial");
+      }
+      throw e;
+    }
+
+    // Credit user balance (全额退到账户)
+    db.prepare(
+      `UPDATE users SET balance = balance + ? WHERE id = ?`,
+    ).run(amount, user_id);
+
+    // Record transaction flow (kind='redeem_split' so /history distinguishes
+    // this from normal 'deposit' / 'refund' / 'withdraw')
+    recordTransaction(db, {
+      user_id,
+      kind: 'redeem_split',
+      amount,
+      counterparty: 'bank',
+      serial: serialBytes,
+      session_id: null,
+      note: `split into ${splitCount}×${split_denomination}BC`,
+    });
+
+    // bank_reserve.total_redeemed += amount（与 /redeem 一致：token 兑付
+    // 后退出流通，total_redeemed 记录所有兑付总量）
+    db.prepare(
+      `UPDATE bank_reserve
+          SET total_redeemed = total_redeemed + ?,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`
+    ).run(amount);
+
+    // Audit log inside tx
+    logAction({
+      actor_id: user_id,
+      action: 'redeem_split',
+      amount,
+      target: Buffer.from(serialBytes).toString('hex').slice(0, 16) + '...',
+      meta: JSON.stringify({ key_version: keyVersion, split_denomination, split_count: splitCount }),
+      db,
+    });
+
+    // assertInvariant 在事务内——失败整体回滚
+    assertInvariant(db);
+
+    const row = db.prepare(
+      `SELECT balance FROM users WHERE id = ?`,
+    ).get(user_id);
+    if (!row) {
+      throw new PaymentError(500, 'USER_NOT_FOUND', 'user account vanished mid-transaction');
+    }
+
+    return {
+      deposited: amount,
+      new_balance: row.balance,
+      split_denomination,
+      split_count: splitCount,
+      limitations: REDEEM_SPLIT_LIMITATIONS,
+    };
   });
 }

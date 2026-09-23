@@ -47,6 +47,21 @@ export { TOKEN_DOMAIN_TAG };
 export const BANK_KEY_ROW_ID = 1;
 
 /**
+ * Phase 6.1 (v6 §四 6.1)：多面额密钥。
+ *
+ * 不同面额用不同签名密钥——这样银行按面额分桶统计 spent_coins 时，
+ * 同一面额的 token 构成一个匿名集（6.3 匿名集分析的基础）。
+ * 如果所有面额共用一把密钥，匿名集会混在一起，无法按面额分组。
+ *
+ * 面额集合 [1, 5, 10, 50, 100] BC 覆盖教学演示所需的小额到大额场景。
+ * 新增面额需同步更新此数组 + 前端面额选择 UI。
+ *
+ * ISOLATION §五 不变量 7 扩展：每个 (denomination, status='active') 对
+ * 最多一把密钥——007 迁移的 partial unique index 保证。
+ */
+export const DENOMINATIONS = [1, 5, 10, 50, 100];
+
+/**
  * Master encryption key for at-rest encryption of bank private keys.
  *
  * Phase 3 (v5 §三 3.1)：私钥用 AES-256-GCM 加密后存 DB。

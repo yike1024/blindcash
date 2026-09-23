@@ -41,14 +41,14 @@ function handleError(res, err) {
   return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
 }
 
-// ① POST /api/withdraw/init
+// ① POST /api/withdraw/init — Phase 6.1: 加 denomination 参数
 router.post('/init', withdrawGuard, (req, res) => {
   try {
-    const { amount } = req.body;
+    const { amount, denomination } = req.body;
     if (amount === undefined) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'amount is required' });
     }
-    const result = initWithdrawal({ customer_id: req.user.userId, amount });
+    const result = initWithdrawal({ customer_id: req.user.userId, amount, denomination });
     return res.status(201).json(result);
   } catch (err) {
     return handleError(res, err);

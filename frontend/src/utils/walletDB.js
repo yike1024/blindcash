@@ -13,17 +13,26 @@
 // **serial 做 keyPath**：天然 PRIMARY KEY，重复存入同一 serial 会触发
 //   ConstraintError——防重复存入（同一 token 存两次没意义）。
 //
+// Phase 6.4 (v6 §四 6.4)：新增 pending_payments store。网络故障时支付请求
+// 暂存于此，待网络恢复后用户可手动重试。与 coins store 隔离——pending
+// 的 token 仍在钱包里（未消费），重试成功后才从 coins 删除。
+//
 // 依赖：idb（Jake Archibald 维护的 IndexedDB promise 封装，~1.2KB）。
 
 import { openDB } from 'idb';
 
 const DB_NAME = 'blindcash-wallet';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'coins';
+const PENDING_STORE = 'pending_payments';
 
 /**
  * Token v2 schema (Phase 1 §三 1.7):
  *   { serial(64hex), amount, R_prime(66hex), s_prime(64hex), key_id, created_at }
+ *
+ * Pending payment record (Phase 6.4):
+ *   { id(auto), token, created_at, attempts, last_error }
+ *   token = { serial, amount, R_prime, s_prime, key_id } — 原样存副本
  */
 
 // Singleton DB promise — openDB is called once and reused.
@@ -32,10 +41,23 @@ let dbPromise = null;
 function getDb() {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        if (!db.objectStoreNames.contains(STORE)) {
-          const store = db.createObjectStore(STORE, { keyPath: 'serial' });
-          store.createIndex('created_at', 'created_at', { unique: false });
+      upgrade(db, oldVersion) {
+        // v1: coins store
+        if (oldVersion < 1) {
+          if (!db.objectStoreNames.contains(STORE)) {
+            const store = db.createObjectStore(STORE, { keyPath: 'serial' });
+            store.createIndex('created_at', 'created_at', { unique: false });
+          }
+        }
+        // v2 (Phase 6.4): pending_payments store
+        if (oldVersion < 2) {
+          if (!db.objectStoreNames.contains(PENDING_STORE)) {
+            const pStore = db.createObjectStore(PENDING_STORE, {
+              keyPath: 'id',
+              autoIncrement: true,
+            });
+            pStore.createIndex('created_at', 'created_at', { unique: false });
+          }
         }
       },
     });
@@ -144,6 +166,92 @@ export async function clearAll() {
 export async function totalBalance() {
   const coins = await listCoins();
   return coins.reduce((sum, c) => sum + (c.amount ?? 0), 0);
+}
+
+// ───────────────────────────────────────────────────────────────
+// Phase 6.4: pending_payments — 离线支付暂存与重试
+// ───────────────────────────────────────────────────────────────
+
+/**
+ * Queue a payment for later retry. Called when /payment fails due to
+ * network error or 5xx server error (NOT for 4xx permanent failures like
+ * SIGNATURE_INVALID or DOUBLE_SPEND — those are handled differently).
+ *
+ * The token is stored as a COPY so that deleting it from the coins store
+ * (on successful retry or DOUBLE_SPEND confirmation) doesn't destroy the
+ * retry record.
+ *
+ * @param {{serial:string, amount:number, R_prime:string, s_prime:string, key_id?:number}} token
+ * @param {string} errorMsg — human-readable error from the failed attempt
+ * @returns {Promise<number>} the auto-assigned pending payment id
+ */
+export async function addPendingPayment(token, errorMsg) {
+  const db = await getDb();
+  const record = {
+    token: { ...token }, // shallow copy — detach from caller's reference
+    created_at: Date.now(),
+    attempts: 0,
+    last_error: errorMsg ?? 'unknown error',
+  };
+  const id = await db.add(PENDING_STORE, record);
+  return id;
+}
+
+/**
+ * List all pending payments, sorted by created_at ascending (oldest first
+ * — oldest should be retried first).
+ * @returns {Promise<Array<{id:number, token:object, created_at:number, attempts:number, last_error:string}>>}
+ */
+export async function listPendingPayments() {
+  const db = await getDb();
+  const all = await db.getAll(PENDING_STORE);
+  return all.sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0));
+}
+
+/**
+ * Delete a pending payment by id (after successful retry or permanent
+ * failure confirmation like DOUBLE_SPEND).
+ * @param {number} id
+ * @returns {Promise<void>}
+ */
+export async function deletePendingPayment(id) {
+  const db = await getDb();
+  await db.delete(PENDING_STORE, id);
+}
+
+/**
+ * Increment the attempts counter and update last_error for a pending payment.
+ * Called after each retry attempt (success or failure).
+ *
+ * @param {number} id
+ * @param {string} errorMsg — empty string clears the error on success
+ * @returns {Promise<void>}
+ */
+export async function updatePendingPaymentAttempt(id, errorMsg) {
+  const db = await getDb();
+  const record = await db.get(PENDING_STORE, id);
+  if (!record) return;
+  record.attempts = (record.attempts ?? 0) + 1;
+  record.last_error = errorMsg ?? '';
+  await db.put(PENDING_STORE, record);
+}
+
+/**
+ * Count pending payments — used for the Dashboard badge.
+ * @returns {Promise<number>}
+ */
+export async function countPendingPayments() {
+  const db = await getDb();
+  return db.count(PENDING_STORE);
+}
+
+/**
+ * Clear all pending payments. Primarily for testing / debugging.
+ * @returns {Promise<void>}
+ */
+export async function clearAllPending() {
+  const db = await getDb();
+  await db.clear(PENDING_STORE);
 }
 
 // Export for tests to reset the singleton between test files.

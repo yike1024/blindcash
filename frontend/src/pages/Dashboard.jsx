@@ -7,10 +7,14 @@
 //
 // Phase 1 (v5 §三 1.5 开户改革)：新用户 balance=0，需先到 /bank 充值才能
 // 取款。余额为 0 时主 CTA 指向"银行充值"而非"取款"，避免用户撞 INSUFFICIENT_BALANCE。
+// Phase 6.4：显示待重试支付徽章——从 IndexedDB pending_payments store 读取
+//   数量，>0 时在余额区下方显示告警卡片引导用户去 /payment 重试。
 
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRightOutlined, SafetyOutlined, BankOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, SafetyOutlined, BankOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext.jsx';
+import { countPendingPayments } from '../utils/walletDB.js';
 
 const ROLE_META = {
   customer: { label: '顾客', verb: '取款', route: '/withdraw', caption: '盲签名 · 4-move 切换校验' },
@@ -20,6 +24,21 @@ const ROLE_META = {
 export default function DashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Phase 6.4: load pending payment count for badge
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const count = await countPendingPayments();
+        if (!cancelled) setPendingCount(count);
+      } catch {
+        // IndexedDB not available — silently ignore
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const role = user?.role ?? 'customer';
   const meta = ROLE_META[role] ?? ROLE_META.customer;
@@ -69,6 +88,50 @@ export default function DashboardPage() {
           </div>
         </div>
       </section>
+
+      {/* ── Phase 6.4: 待重试支付告警 ── */}
+      {pendingCount > 0 && (
+        <section
+          className="bc-card bc-rise-3"
+          style={{
+            padding: '20px 28px',
+            marginBottom: 24,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 16,
+            flexWrap: 'wrap',
+            borderLeft: '3px solid #fa8c16',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <ClockCircleOutlined style={{ fontSize: 28, color: '#fa8c16' }} />
+            <div>
+              <div className="bc-display" style={{ fontSize: 18, marginBottom: 4 }}>
+                {pendingCount} 笔待重试支付
+              </div>
+              <div className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                网络故障时暂存的支付 · 点击前往收款页重试
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="bc-ghost-btn"
+            onClick={() => navigate('/payment')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 13,
+              color: 'var(--gold-400)',
+            }}
+          >
+            前往重试
+            <ArrowRightOutlined />
+          </button>
+        </section>
+      )}
 
       {/* ── Primary action card ── */}
       {/* Phase 1 (v5 §三 1.5)：余额=0 时主 CTA 指向 /bank 充值，而非取款。 */}

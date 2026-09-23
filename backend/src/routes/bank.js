@@ -19,9 +19,13 @@
 import { Router } from 'express';
 import { authenticateJWT } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
-import { getActivePublicKey, getActiveKeyVersion } from '../services/bankKeyService.js';
+import {
+  getActivePublicKey, getActiveKeyVersion,
+  getActivePublicKeyByDenom, getActiveKeyVersionByDenom,
+} from '../services/bankKeyService.js';
+import { DENOMINATIONS } from '../config/bank.js';
 import { deposit, BankServiceError } from '../services/bankService.js';
-import { processPayment, PaymentError } from '../services/paymentService.js';
+import { processPayment, redeemSplit, PaymentError } from '../services/paymentService.js';
 import { getDb } from '../models/db.js';
 import { bytesToHex } from '../utils/hex.js';
 
@@ -55,6 +59,30 @@ router.get('/pubkey', (_req, res) => {
     // 前端取款时把 key_id 写入 token v2 schema，支付/退币时拿它查公钥验签。
     // 密钥轮换后此字段会随 active 切换而变化。
     key_id: getActiveKeyVersion(),
+  });
+});
+
+// GET /api/bank/pubkeys — Phase 6.1: 返回所有面额的 active 公钥映射
+//
+// 前端取款时按面额选择 denom，从本接口拿到对应 denom 的公钥 P 来
+// 计算盲化承诺 R' = R + α·G + β·P。每个 denom 有独立的密钥对，
+// 密钥轮换后对应 denom 的 key_id 会变化。
+//
+// No auth — public keys are public knowledge.
+router.get('/pubkeys', (_req, res) => {
+  const denominations = {};
+  for (const denom of DENOMINATIONS) {
+    const pk = getActivePublicKeyByDenom(denom);
+    const kv = getActiveKeyVersionByDenom(denom);
+    denominations[denom] = {
+      public_key: bytesToHex(pk),
+      key_id: kv,
+    };
+  }
+  res.json({
+    denominations,
+    encoding: 'secp256k1-compressed',
+    byte_length: 33,
   });
 });
 
@@ -152,6 +180,54 @@ router.post('/redeem', authenticateJWT, (req, res) => {
       R_prime,
       s_prime,
       key_id,  // N4: 透传给 service 层用 getPublicKeyByVersion
+    });
+    return res.json(result);
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
+// POST /api/bank/redeem-split — Phase 6.2: 部分取款 / 找零兑付（教学化）
+//
+// v6 §四 6.2 落地：用户持有大面额 token（如 50 BC），希望拆成更小面额
+// 的零钱。由于 Chaum 协议下"找零"必须发行新 token（要走 4-move withdrawal），
+// 本接口的简化语义是：把大额 token 全额退到账户 + 在 spent_coins 表按
+// split_denomination 记账（教学化展示"等价于多少枚小币"）。用户随后可
+// 另走 4-move 取款流程取 split_denomination 面额的新 token。
+//
+// body: { serial, amount, R_prime, s_prime, key_id?, split_denomination }
+//   split_denomination ∈ {1, 5, 10, 50, 100}，必须能整除 amount
+// returns: { deposited, new_balance, split_denomination, split_count, limitations }
+//
+// **隐私局限**（返回 limitations 数组，前端必须诚实展示）：
+//   - 不是真正的 Chaum 找零（银行只全额退币，需另走取款流程）
+//   - spent_coins 按 split_denomination 记账仅是教学展示
+//   - 时间侧信道：大额兑付 + 后续小额取款可被关联（参考 Chaum 1985）
+//
+// 文献参考：
+//   [1] Brands S. 1993. "Untraceable Off-Line Cash in Wallets with Observers".
+//       Crypto'93. §3 — 商户侧找零协议的早期方案。
+//   [2] Chaum D. 1985. "Security Without Identification". CACM 28(10).
+//       §"Privacy" — 时间侧信道对匿名集的削弱。
+router.post('/redeem-split', authenticateJWT, (req, res) => {
+  try {
+    const { serial, amount, R_prime, s_prime, key_id, split_denomination } = req.body || {};
+    if (serial === undefined || amount === undefined
+        || R_prime === undefined || s_prime === undefined
+        || split_denomination === undefined) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        message: 'required fields: serial, amount, R_prime, s_prime, split_denomination',
+      });
+    }
+    const result = redeemSplit({
+      user_id: req.user.userId,
+      serial,
+      amount,
+      R_prime,
+      s_prime,
+      key_id,
+      split_denomination,
     });
     return res.json(result);
   } catch (err) {

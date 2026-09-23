@@ -97,10 +97,12 @@ function isEncrypted(blob) {
 
 // ── In-memory caches ──
 
-// Active key cache: { publicKey, privateKey, key_version }
-let _activeCache = null;
+// Active key cache: Map<denom, { publicKey, privateKey, key_version, denomination }>
+// Phase 6.1: 每个面额有独立的 active 密钥，缓存按 denom 分桶。
+// 旧代码 getPublicKey()/getActivePublicKey() 等无参函数默认走 denom=1。
+const _activeCache = new Map();
 
-// Version cache: Map<key_version, { publicKey, privateKey, status, retired_until }>
+// Version cache: Map<key_version, { publicKey, privateKey, status, retired_until, denomination }>
 const _versionCache = new Map();
 
 /**
@@ -140,16 +142,20 @@ function assertKeypairConsistent(kp) {
 }
 
 /**
- * Read the active key row from DB, decrypt private_key, handle migration
- * plaintext → encrypted upgrade.
+ * Read the active key row from DB for a given denomination, decrypt
+ * private_key, handle migration plaintext → encrypted upgrade.
  *
- * @returns {{publicKey:Uint8Array, privateKey:Uint8Array, key_version:number}|null}
+ * Phase 6.1: 每个 denom 有独立的 active 密钥行。
+ *
+ * @param {number} denom — denomination (1, 5, 10, 50, 100)
+ * @returns {{publicKey:Uint8Array, privateKey:Uint8Array, key_version:number, denomination:number}|null}
  */
-function loadActiveFromDb() {
+function loadActiveFromDb(denom) {
   const row = queryOne(
     `SELECT key_version, public_key, private_key FROM bank_keys
-     WHERE status = 'active'
+     WHERE status = 'active' AND denomination = ?
      ORDER BY key_version DESC LIMIT 1`,
+    [denom],
   );
   if (!row) return null;
 
@@ -175,78 +181,115 @@ function loadActiveFromDb() {
     );
   }
 
-  return { publicKey, privateKey, key_version: row.key_version };
+  return { publicKey, privateKey, key_version: row.key_version, denomination: denom };
 }
 
 /**
- * Get the active bank keypair, generating + persisting it on first boot.
- * Idempotent: subsequent calls return the same keypair from cache.
+ * Get the active bank keypair for a denomination, generating + persisting
+ * it on first boot. Idempotent: subsequent calls return the same keypair
+ * from cache.
+ *
+ * Phase 6.1: 每个 denom 有独立的 active 密钥行。第一次调用某 denom 时
+ * 如果 DB 没有该 denom 的 active 密钥，自动生成 + 加密 + 持久化。
  *
  * Phase 3: reads status='active' row. If none, generates a new keypair,
  * AES-encrypts the private key, and INSERTs with key_version = max+1.
  *
- * @returns {{publicKey: Uint8Array, privateKey: Uint8Array, key_version: number}}
+ * @param {number} [denom=1] — denomination (1, 5, 10, 50, 100)
+ * @returns {{publicKey: Uint8Array, privateKey: Uint8Array, key_version: number, denomination: number}}
  * @throws {Error} if stored keypair fails consistency self-check
  */
-export function getOrGenerate() {
-  if (_activeCache) return _activeCache;
+export function getOrGenerate(denom = 1) {
+  if (_activeCache.has(denom)) return _activeCache.get(denom);
 
-  let kp = loadActiveFromDb();
+  let kp = loadActiveFromDb(denom);
 
   if (!kp) {
-    // First boot: generate a fresh keypair, encrypt, persist.
+    // First boot for this denom: generate a fresh keypair, encrypt, persist.
     const fresh = generateKeyPair();
     const encBlob = encryptPrivateKey(fresh.privateKey);
 
-    // key_version = max existing + 1, or 1 if table empty
+    // key_version = max existing + 1 (globally unique across ALL denoms)
     const maxRow = queryOne(
       `SELECT COALESCE(MAX(key_version), 0) AS mv FROM bank_keys`,
     );
     const keyVersion = (maxRow?.mv ?? 0) + 1;
 
     runWrite(
-      `INSERT INTO bank_keys (key_version, public_key, private_key, status)
-       VALUES (?, ?, ?, 'active')`,
-      [keyVersion, Buffer.from(fresh.publicKey), encBlob],
+      `INSERT INTO bank_keys (key_version, denomination, public_key, private_key, status)
+       VALUES (?, ?, ?, ?, 'active')`,
+      [keyVersion, denom, Buffer.from(fresh.publicKey), encBlob],
     );
-    kp = { publicKey: fresh.publicKey, privateKey: fresh.privateKey, key_version: keyVersion };
+    kp = { publicKey: fresh.publicKey, privateKey: fresh.privateKey, key_version: keyVersion, denomination: denom };
   } else {
     // Subsequent boot: verify the stored keypair is self-consistent.
     assertKeypairConsistent(kp);
   }
 
-  _activeCache = kp;
+  _activeCache.set(denom, kp);
   return kp;
 }
 
 /**
  * Get the bank public key (33-byte compressed P = x·G).
- * Backward-compat alias for getActivePublicKey().
+ * Backward-compat alias for getActivePublicKey() — denom=1.
  * @returns {Uint8Array} 33 bytes
  */
 export function getPublicKey() {
-  if (!_activeCache) getOrGenerate();
-  return _activeCache.publicKey;
+  return getOrGenerate(1).publicKey;
 }
 
 /**
- * Get the ACTIVE bank public key (33-byte compressed P = x·G).
+ * Get the ACTIVE bank public key for denom=1 (33-byte compressed P = x·G).
+ * 前向兼容旧调用方（paymentService fallback, bank routes /pubkey alias）。
  * @returns {Uint8Array} 33 bytes
  */
 export function getActivePublicKey() {
-  if (!_activeCache) getOrGenerate();
-  return _activeCache.publicKey;
+  return getOrGenerate(1).publicKey;
 }
 
 /**
- * Get the key_version of the currently active signing key.
+ * Get the key_version of the currently active signing key for denom=1.
  * Used by /api/bank/pubkey and withdrawalService reveal to tell clients
  * which key_version their token was signed with.
  * @returns {number}
  */
 export function getActiveKeyVersion() {
-  if (!_activeCache) getOrGenerate();
-  return _activeCache.key_version;
+  return getOrGenerate(1).key_version;
+}
+
+/**
+ * Get the ACTIVE bank public key for a specific denomination.
+ * Phase 6.1: 取款时按 denom 选密钥，前端需要拿到对应面额的公钥
+ * 来计算盲化承诺 R' = R + α·G + β·P。
+ * @param {number} denom — denomination (1, 5, 10, 50, 100)
+ * @returns {Uint8Array} 33 bytes
+ */
+export function getActivePublicKeyByDenom(denom) {
+  return getOrGenerate(denom).publicKey;
+}
+
+/**
+ * Get the key_version of the currently active signing key for a denomination.
+ * Phase 6.1: revealAndSign 返回的 key_id 必须是 token 对应 denom 的
+ * active key_version，这样支付时 getPublicKeyByVersion(key_id) 能反查
+ * 到正确的公钥验签。
+ * @param {number} denom
+ * @returns {number}
+ */
+export function getActiveKeyVersionByDenom(denom) {
+  return getOrGenerate(denom).key_version;
+}
+
+/**
+ * Get the bank private key for a denomination (32-byte scalar x).
+ * Phase 6.1: revealAndSign 按 session.denomination 选对应密钥的私钥签名。
+ * ⚠ INTERNAL ONLY — never wire to an HTTP route.
+ * @param {number} [denom=1]
+ * @returns {Uint8Array} 32 bytes
+ */
+export function getPrivateKeyByDenom(denom = 1) {
+  return getOrGenerate(denom).privateKey;
 }
 
 /**
@@ -271,7 +314,7 @@ export function getPublicKeyByVersion(v) {
   }
 
   const row = queryOne(
-    `SELECT public_key, private_key, status, retired_until
+    `SELECT public_key, private_key, status, retired_until, denomination
      FROM bank_keys WHERE key_version = ?`,
     [v],
   );
@@ -302,11 +345,38 @@ export function getPublicKeyByVersion(v) {
     privateKey,
     status: row.status,
     retired_until: row.retired_until,
+    denomination: row.denomination ?? 1, // Phase 6.1
   };
   _versionCache.set(v, entry);
 
   checkRetired(entry, v);
   return entry.publicKey;
+}
+
+/**
+ * Get the denomination of a key by key_version. Used by paymentService
+ * to record denomination in spent_coins for 6.3 anonymity set analysis.
+ *
+ * Phase 6.1: token 的 key_id 对应全局唯一的 key_version，由此可反查 denom。
+ * 这样前端无需在 token 里带 denomination（防篡改）——服务端从 key_id 推导。
+ *
+ * @param {number} v — key_version
+ * @returns {number} denomination
+ * @throws {BankKeyError} 404 KEY_NOT_FOUND
+ */
+export function getDenominationByVersion(v) {
+  if (_versionCache.has(v)) {
+    return _versionCache.get(v).denomination ?? 1;
+  }
+  const row = queryOne(
+    `SELECT denomination FROM bank_keys WHERE key_version = ?`,
+    [v],
+  );
+  if (!row) {
+    throw new BankKeyError(404, 'KEY_NOT_FOUND',
+      `unknown key_version ${v}`);
+  }
+  return row.denomination ?? 1;
 }
 
 /**
@@ -333,28 +403,39 @@ function checkRetired(entry, v) {
 }
 
 /**
- * Get the bank private key (32-byte scalar x).
+ * Get the bank private key for denom=1 (32-byte scalar x).
  * ⚠ INTERNAL ONLY — never wire to an HTTP route.
+ * Phase 6.1: 多面额时用 getPrivateKeyByDenom(denom) 选对应密钥。
  * @returns {Uint8Array} 32 bytes
  */
 export function getPrivateKey() {
-  if (!_activeCache) getOrGenerate();
-  return _activeCache.privateKey;
+  return getOrGenerate(1).privateKey;
 }
 
 /**
- * Rotate the bank signing key: mark the current active key as retired
- * (with a 90-day grace period for old tokens), then generate + persist
- * a new active key with an incremented key_version.
+ * Rotate the bank signing key for a denomination: mark the current active
+ * key as retired (with a 90-day grace period for old tokens), then generate
+ * + persist a new active key with an incremented key_version.
+ *
+ * Phase 6.1: rotateKey 按 denom 轮换。key_version 是全局唯一的，新密钥的
+ * key_version = MAX(all key_version) + 1（跨所有 denom），这样新密钥的
+ * key_version 不会与任何其他 denom 的密钥冲突。
  *
  * Grace period (v5 §三 3.2): old tokens can still be verified (getPublicKeyByVersion
  * returns the old public key) for 90 days. After retired_until, verification → 403.
  *
+ * @param {number} [denom=1] — denomination to rotate
  * @param {number} [actorId] — admin user id (for audit log)
- * @returns {{old_version: number, new_version: number}}
+ * @returns {{old_version: number, new_version: number, denomination: number}}
  */
-export function rotateKey(actorId) {
-  const current = getOrGenerate();
+export function rotateKey(denom = 1, actorId) {
+  // 前向兼容：旧签名 rotateKey(actorId) 可能传 null 或 userId 作第一个参数。
+  // 如果 denom 不是正整数，视为旧签名调用：denom=1，actorId=原参数。
+  if (!Number.isInteger(denom) || denom <= 0) {
+    actorId = denom;
+    denom = 1;
+  }
+  const current = getOrGenerate(denom);
   const oldVersion = current.key_version;
 
   // Mark old key as retired with 90-day grace period
@@ -372,36 +453,39 @@ export function rotateKey(actorId) {
     [nowIso, untilIso, oldVersion],
   );
 
-  // Generate new active key
+  // Generate new active key. key_version is globally unique across ALL denoms.
   const fresh = generateKeyPair();
   const encBlob = encryptPrivateKey(fresh.privateKey);
-  const newVersion = oldVersion + 1;
+  const maxRow = queryOne(
+    `SELECT COALESCE(MAX(key_version), 0) AS mv FROM bank_keys`,
+  );
+  const newVersion = (maxRow?.mv ?? 0) + 1;
 
   runWrite(
-    `INSERT INTO bank_keys (key_version, public_key, private_key, status)
-     VALUES (?, ?, ?, 'active')`,
-    [newVersion, Buffer.from(fresh.publicKey), encBlob],
+    `INSERT INTO bank_keys (key_version, denomination, public_key, private_key, status)
+     VALUES (?, ?, ?, ?, 'active')`,
+    [newVersion, denom, Buffer.from(fresh.publicKey), encBlob],
   );
 
   // Clear caches so subsequent calls read the new active key
-  _activeCache = null;
+  _activeCache.delete(denom);
   _versionCache.delete(oldVersion);
 
   // Audit log (standalone — rotateKey is called from admin route, not inside a tx)
   logAction({
     actor_id: actorId ?? null,
     action: 'key_rotate',
-    target: `v${oldVersion}→v${newVersion}`,
-    meta: JSON.stringify({ old_version: oldVersion, new_version: newVersion, retired_until: untilIso }),
+    target: `denom${denom}:v${oldVersion}→v${newVersion}`,
+    meta: JSON.stringify({ denomination: denom, old_version: oldVersion, new_version: newVersion, retired_until: untilIso }),
   });
 
-  return { old_version: oldVersion, new_version: newVersion };
+  return { old_version: oldVersion, new_version: newVersion, denomination: denom };
 }
 
 /**
  * Reset in-memory caches. Used by tests to force re-load from DB.
  */
 export function _resetCacheForTest() {
-  _activeCache = null;
+  _activeCache.clear();
   _versionCache.clear();
 }

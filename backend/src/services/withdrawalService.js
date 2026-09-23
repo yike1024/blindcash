@@ -20,7 +20,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { queryOne, runWrite } from '../models/db.js';
-import { getActivePublicKey, getPrivateKey, getActiveKeyVersion } from './bankKeyService.js';
+import { getActivePublicKeyByDenom, getPrivateKeyByDenom, getActiveKeyVersionByDenom } from './bankKeyService.js';
 import { bankStep1, bankStep3 } from '../crypto/server/schnorrBlind.js';
 import { verifyRevealed, pickRandomJ } from '../crypto/server/cutAndChoose.js';
 import { randomScalar, scalarToBytes, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
@@ -125,19 +125,31 @@ export function lazyCleanupExpiredSessions(customerId) {
  *      - debit balance
  *      - generate N fresh k_i (randomScalar — 不变量 5, never reused)
  *      - compute R_i = k_i·G (bankStep1)
- *      - INSERT session(pending, expires_at)
- *   3. return { session_id, R_1..R_N, amount, N, ttl_ms }
+ *      - INSERT session(pending, expires_at, denomination)
+ *   3. return { session_id, R_1..R_N, amount, N, ttl_ms, key_id }
  *
- * @param {{customer_id:number, amount:number}} args
- * @returns {{session_id:string, R:string[], amount:number, N:number, ttl_ms:number}}
+ * Phase 6.1: 加 denomination 参数。不同面额用不同密钥——init 时在 session
+ * 行记录 denom，reveal 时从 session 读出选对应密钥的私钥签名。init 返回
+ * key_id（该 denom 的 active key_version），前端写入 token v2 schema。
+ *
+ * @param {{customer_id:number, amount:number, denomination?:number}} args
+ * @returns {{session_id:string, R:string[], amount:number, N:number, ttl_ms:number, key_id:number}}
  */
-export function initWithdrawal({ customer_id, amount }) {
+export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw new WithdrawalError(400, 'INVALID_AMOUNT', 'amount must be a positive integer');
+  }
+  if (!Number.isInteger(denomination) || denomination <= 0) {
+    throw new WithdrawalError(400, 'INVALID_DENOMINATION',
+      'denomination must be a positive integer');
   }
 
   // ① lazy-cleanup this customer's expired sessions before considering a new one
   lazyCleanupExpiredSessions(customer_id);
+
+  // Phase 6.1: 确保该 denom 的 active 密钥存在（首次使用某面额时自动生成）
+  // 并获取 key_version，前端需要它写入 token v2 schema。
+  const keyId = getActiveKeyVersionByDenom(denomination);
 
   return runInvariantCheckedTx((db) => {
     // 不变量 4: at most one active session per customer
@@ -178,16 +190,17 @@ export function initWithdrawal({ customer_id, amount }) {
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
     db.prepare(
       `INSERT INTO withdrawal_sessions
-         (id, customer_id, amount, n_candidates, candidates, status, expires_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-    ).run(sessionId, customer_id, amount, N, JSON.stringify(candidates), expiresAt);
+         (id, customer_id, amount, denomination, n_candidates, candidates, status, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    ).run(sessionId, customer_id, amount, denomination, N, JSON.stringify(candidates), expiresAt);
 
     // Phase 1 (v5 §三 1.4)：在途项 +amount，balance -amount，公式两侧同步。
     assertInvariant(db);
 
     // M6: return ttl_ms so the frontend countdown uses the server's real TTL
     // (single source of truth — BC_SESSION_TTL_MS may override the default).
-    return { session_id: sessionId, R: Rlist, amount, N, ttl_ms: SESSION_TTL_MS };
+    // Phase 6.1: 返回 key_id（该 denom 的 active key_version）。
+    return { session_id: sessionId, R: Rlist, amount, N, ttl_ms: SESSION_TTL_MS, key_id: keyId };
   });
 }
 
@@ -351,7 +364,10 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
     }
 
     const stored = JSON.parse(session.candidates);
-    const publicKey = getActivePublicKey();
+    // Phase 6.1: 从 session 行读 denomination，选对应面额的密钥验签 + 签名。
+    // denomination 在 init 时写入 session 行，用户无法篡改。
+    const denomination = session.denomination || 1;
+    const publicKey = getActivePublicKeyByDenom(denomination);
 
     // verify every i ≠ j
     for (const r of revealed) {
@@ -378,7 +394,7 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
     const candJ = stored[j];
     const kJ = hexToScalar(candJ.k);
     const eJ = hexToScalar(candJ.e);
-    const x = bytesToScalar(getPrivateKey());
+    const x = bytesToScalar(getPrivateKeyByDenom(denomination));
     const sJ = bankStep3(kJ, eJ, x);
 
     db.prepare(
@@ -422,7 +438,7 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
 
     // Phase 3 (v5 §三 3.2)：返回真实 active key_version，不再硬编码 1。
     // 前端取 token v2 schema 的 key_id = 此值，支付/退币时拿它查公钥验签。
-    return { s_j: scalarToHex(sJ), key_id: getActiveKeyVersion() };
+    return { s_j: scalarToHex(sJ), key_id: getActiveKeyVersionByDenom(denomination) };
   });
 
   if (result.error) throw result.error;

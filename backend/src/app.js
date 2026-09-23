@@ -28,6 +28,7 @@ import withdrawalRoutes from './routes/withdrawal.js';
 import paymentRoutes from './routes/payment.js';
 import transactionsRoutes from './routes/transactions.js';
 import adminRoutes from './routes/admin.js';
+import privacyRoutes from './routes/privacy.js';
 
 // Phase 5: resolve paths for serving the built frontend + openapi spec.
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -141,6 +142,9 @@ app.use('/api/transactions', transactionsRoutes);
 
 // Admin routes (Phase 3): GET /api/admin/audit + POST /api/admin/rotate-key
 app.use('/api/admin', adminRoutes);
+
+// Privacy routes (Phase 6.3): POST /api/privacy/report — anonymity set analysis
+app.use('/api/privacy', privacyRoutes);
 
 // Phase 5: API 文档端点。
 // GET /api/openapi.yaml — 返回 OpenAPI 3.1 规范文件（供 Swagger UI 加载）。

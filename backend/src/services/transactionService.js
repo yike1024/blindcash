@@ -9,10 +9,13 @@
 //     没改的分裂状态。
 //   * listTransactions 是独立只读查询，走 getDb() 单例。
 //   * kind 语义：
-//       withdraw — 用户向银行取款，balance 减少；
-//       deposit  — 用户存入 token（商户收款），balance 增加；
-//       refund   — 取款会话取消/过期/abort 后退款，balance 恢复。
-//   * counterparty 对 withdraw/refund 为 'bank'；对 deposit 为 NULL
+//       withdraw     — 用户向银行取款，balance 减少；
+//       deposit      — 用户存入 token（商户收款），balance 增加；
+//       refund       — 取款会话取消/过期/abort 后退款，balance 恢复；
+//       redeem_split — Phase 6.2: 大额 token 按 split_denomination 退币到账户，
+//                      balance 增加（与 deposit 类似，但独立 kind 以便
+//                      /history 区分"找零兑付"与"商户收款"）。
+//   * counterparty 对 withdraw/refund/redeem_split 为 'bank'；对 deposit 为 NULL
 //     （Chaum 盲现的核心：token 匿名，商户无法知道付款人是谁）。
 
 import { getDb } from '../models/db.js';
@@ -33,7 +36,7 @@ export function recordTransaction(db, {
   if (!Number.isInteger(user_id) || user_id <= 0) {
     throw new Error('recordTransaction: user_id must be a positive integer');
   }
-  if (!['withdraw', 'deposit', 'refund'].includes(kind)) {
+  if (!['withdraw', 'deposit', 'refund', 'redeem_split'].includes(kind)) {
     throw new Error(`recordTransaction: invalid kind '${kind}'`);
   }
   if (!Number.isInteger(amount) || amount <= 0) {

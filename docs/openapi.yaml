@@ -217,6 +217,48 @@ paths:
                     type: integer
                     description: 当前 active 密钥版本号
 
+  /api/bank/pubkeys:
+    get:
+      summary: 获取所有面额的银行公钥（Phase 6.1）
+      description: |
+        返回所有面额 (1/5/10/50/100 BC) 的 active 签名公钥映射。
+        每个面额有独立密钥对，密钥轮换后对应面额的 key_id 会变化。
+        无需认证——公钥是公开信息，前端取款时按面额选择 denom 并用对应公钥
+        计算盲化承诺 R' = R + α·G + β·P。
+      responses:
+        '200':
+          description: 所有面额公钥映射
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  denominations:
+                    type: object
+                    description: 面额 → {public_key, key_id} 映射，key 为面额字符串
+                    additionalProperties:
+                      type: object
+                      properties:
+                        public_key:
+                          type: string
+                          description: 66-hex 压缩公钥
+                        key_id:
+                          type: integer
+                          description: 该面额当前 active 密钥版本号
+                    example:
+                      "1":
+                        public_key: "02a1b2..."
+                        key_id: 1
+                      "5":
+                        public_key: "03c4d5..."
+                        key_id: 2
+                  encoding:
+                    type: string
+                    example: secp256k1-compressed
+                  byte_length:
+                    type: integer
+                    example: 33
+
   /api/bank/reserve:
     get:
       summary: 查银行准备金状态（admin）
@@ -327,6 +369,85 @@ paths:
           description: token 格式错误或签名无效
         '409':
           description: token 已被消费（双花）
+
+  /api/bank/redeem-split:
+    post:
+      summary: 找零兑付（Phase 6.2）
+      security:
+        - bearerAuth: []
+      description: |
+        将大面额 token 全额退到账户，并在 spent_coins 表按 split_denomination
+        记账（教学化展示"等价于多少枚小币"）。用户随后可另走 4-move 取款流程
+        取 split_denomination 面额的新 token。
+
+        **隐私局限**（返回 limitations 数组，前端必须诚实展示）：
+        - 不是真正的 Chaum 找零（银行只全额退币，需另走取款流程）
+        - spent_coins 按 split_denomination 记账仅是教学展示
+        - 时间侧信道：大额兑付 + 后续小额取款可被关联（参考 Chaum 1985）
+
+        split_denomination 必须能整除 amount。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serial, amount, R_prime, s_prime, split_denomination]
+              properties:
+                serial:
+                  type: string
+                amount:
+                  type: integer
+                R_prime:
+                  type: string
+                s_prime:
+                  type: string
+                key_id:
+                  type: integer
+                  description: 银行密钥版本号（token v2，可选）
+                split_denomination:
+                  type: integer
+                  enum: [1, 5, 10, 50, 100]
+                  description: 拆分目标面额，必须能整除 amount
+      responses:
+        '200':
+          description: 找零兑付成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deposited:
+                    type: integer
+                  new_balance:
+                    type: integer
+                  split_denomination:
+                    type: integer
+                  split_count:
+                    type: integer
+                    description: amount / split_denomination
+                  limitations:
+                    type: array
+                    items:
+                      type: string
+                    description: 隐私局限说明，前端必须展示
+        '400':
+          description: |
+            错误码：
+            - INVALID_SPLIT_DENOMINATION — split_denomination 不在 [1,5,10,50,100]
+            - SPLIT_NOT_DIVISIBLE — amount 不能被 split_denomination 整除
+            - SIGNATURE_INVALID — 签名验证失败
+            - MALFORMED_TOKEN — token 格式错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: token 已被消费（双花）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/withdraw/init:
     post:
@@ -603,6 +724,75 @@ paths:
                     type: integer
         '403':
           description: 非 admin
+
+  /api/privacy/report:
+    post:
+      summary: 匿名集分析报告（Phase 6.3）
+      security:
+        - bearerAuth: []
+      description: |
+        对用户持有的 token 列表计算匿名集大小。匿名集 = spent_coins 表中
+        相同 (denomination, key_version) 的 token 数量。
+
+        **隐私设计**：前端只发 token 的 key_id（密钥版本号），不发 serial/R'/s'。
+        key_id 本身不是敏感信息——它是银行公钥的版本号，任何人都能从
+        /api/bank/pubkeys 拿到。发 key_id 让服务端反查 denom，不泄露 token 内容。
+
+        **隐私局限**（返回 limitations 数组）：
+        - 匿名集只统计已花费的 token（spent_coins 表），未花费的在客户端钱包
+        - 银行理论上能用时间侧信道缩小集合
+        - 匿名集=1 意味着银行可确定地关联取款与支付
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tokens]
+              properties:
+                tokens:
+                  type: array
+                  description: token 列表（只需 key_id，不发 serial/R'/s'）
+                  items:
+                    type: object
+                    properties:
+                      key_id:
+                        type: integer
+                        description: 银行密钥版本号
+      responses:
+        '200':
+          description: 匿名集报告
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        denomination:
+                          type: integer
+                        key_version:
+                          type: integer
+                        anonymity_set_size:
+                          type: integer
+                          description: spent_coins 中同 (denom, key_version) 的 token 总数
+                        your_tokens:
+                          type: integer
+                          description: 用户当前持有的该 (denom, key_version) token 数
+                  limitations:
+                    type: array
+                    items:
+                      type: string
+                    description: 隐私局限说明
+        '400':
+          description: tokens 不是数组
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/admin/rotate-key:
     post:

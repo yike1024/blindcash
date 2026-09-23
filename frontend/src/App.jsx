@@ -17,6 +17,7 @@ import PaymentPage from './pages/Payment.jsx';
 import BankPage from './pages/Bank.jsx';
 import WalletPage from './pages/Wallet.jsx';
 import HistoryPage from './pages/History.jsx';
+import PrivacyPage from './pages/Privacy.jsx';
 
 export default function App() {
   return (
@@ -44,6 +45,8 @@ export default function App() {
         <Route path="/payment" element={<PaymentPage />} />
         {/* M7: 任何登录用户都可看自己的账本流水 */}
         <Route path="/history" element={<HistoryPage />} />
+        {/* Phase 6.3: 匿名集分析——按 (面额, 密钥版本) 统计不可区分性 */}
+        <Route path="/privacy" element={<PrivacyPage />} />
       </Route>
 
       {/* Fallback */}
