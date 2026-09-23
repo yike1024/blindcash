@@ -25,7 +25,7 @@
 //   迁移期明文 = 32 bytes（005 迁移拷贝旧明文，首次启动时检测并加密回写）
 
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { getDb, queryOne, runWrite } from '../models/db.js';
+import { getDb, queryOne, runWrite, runImmediateTx } from '../models/db.js';
 import { generateKeyPair } from '../crypto/server/schnorrBlind.js';
 import {
   G,
@@ -438,34 +438,48 @@ export function rotateKey(denom = 1, actorId) {
   const current = getOrGenerate(denom);
   const oldVersion = current.key_version;
 
-  // Mark old key as retired with 90-day grace period
+  // Mark old key as retired with 90-day grace period.
+  // L1 fix: all timestamps are UTC (toISOString outputs UTC). Comments
+  // throughout the codebase should treat these as UTC, not server-local.
   const now = new Date();
   const retiredUntil = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
   const nowIso = now.toISOString().replace('T', ' ').slice(0, 19);
   const untilIso = retiredUntil.toISOString().replace('T', ' ').slice(0, 19);
 
-  runWrite(
-    `UPDATE bank_keys
-        SET status = 'retired',
-            retired_at = ?,
-            retired_until = ?
-      WHERE key_version = ? AND status = 'active'`,
-    [nowIso, untilIso, oldVersion],
-  );
-
-  // Generate new active key. key_version is globally unique across ALL denoms.
+  // M1+M2 fix: wrap UPDATE (retire old) + SELECT MAX(key_version) + INSERT
+  // (new active) in a SINGLE runImmediateTx so:
+  //   - M1: if the process crashes between the two writes, the entire
+  //     transaction rolls back — the old key stays 'active', no gap.
+  //   - M2: SELECT MAX and INSERT are now in the same BEGIN IMMEDIATE,
+  //     so concurrent rotateKey calls are serialized — the second one
+  //     sees the first's INSERT and computes a different newVersion.
   const fresh = generateKeyPair();
   const encBlob = encryptPrivateKey(fresh.privateKey);
-  const maxRow = queryOne(
-    `SELECT COALESCE(MAX(key_version), 0) AS mv FROM bank_keys`,
-  );
-  const newVersion = (maxRow?.mv ?? 0) + 1;
 
-  runWrite(
-    `INSERT INTO bank_keys (key_version, denomination, public_key, private_key, status)
-     VALUES (?, ?, ?, ?, 'active')`,
-    [newVersion, denom, Buffer.from(fresh.publicKey), encBlob],
-  );
+  const newVersion = runImmediateTx((db) => {
+    // Step 1: retire old key
+    db.prepare(
+      `UPDATE bank_keys
+          SET status = 'retired',
+              retired_at = ?,
+              retired_until = ?
+        WHERE key_version = ? AND status = 'active'`,
+    ).run(nowIso, untilIso, oldVersion);
+
+    // Step 2: atomically compute next key_version INSIDE the same tx
+    const maxRow = db.prepare(
+      `SELECT COALESCE(MAX(key_version), 0) AS mv FROM bank_keys`,
+    ).get();
+    const nv = (maxRow?.mv ?? 0) + 1;
+
+    // Step 3: insert new active key
+    db.prepare(
+      `INSERT INTO bank_keys (key_version, denomination, public_key, private_key, status)
+       VALUES (?, ?, ?, ?, 'active')`,
+    ).run(nv, denom, Buffer.from(fresh.publicKey), encBlob);
+
+    return nv;
+  });
 
   // Clear caches so subsequent calls read the new active key
   _activeCache.delete(denom);

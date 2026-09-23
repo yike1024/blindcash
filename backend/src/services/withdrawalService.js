@@ -25,7 +25,7 @@ import { bankStep1, bankStep3 } from '../crypto/server/schnorrBlind.js';
 import { verifyRevealed, pickRandomJ } from '../crypto/server/cutAndChoose.js';
 import { randomScalar, scalarToBytes, bytesToScalar, isValidScalar } from '../crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '../utils/hex.js';
-import { CUT_AND_CHOOSE_N, SESSION_TTL_MS } from '../config/bank.js';
+import { CUT_AND_CHOOSE_N, SESSION_TTL_MS, DENOMINATIONS } from '../config/bank.js';
 import { recordTransaction } from './transactionService.js';
 import { assertInvariant, runInvariantCheckedTx } from './bankReserveService.js';
 import { logAction } from './auditService.js';
@@ -142,6 +142,14 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
   if (!Number.isInteger(denomination) || denomination <= 0) {
     throw new WithdrawalError(400, 'INVALID_DENOMINATION',
       'denomination must be a positive integer');
+  }
+  // L2 fix: reject denominations outside the whitelist. Without this, a user
+  // could request denom=999 — getOrGenerate(999) would auto-create a key,
+  // wasting key management space and producing an anonymity set of 1 (the
+  // user is the only one using that denom, destroying privacy).
+  if (!DENOMINATIONS.includes(denomination)) {
+    throw new WithdrawalError(400, 'INVALID_DENOMINATION',
+      `denomination must be one of ${DENOMINATIONS.join(', ')}, got ${denomination}`);
   }
 
   // ① lazy-cleanup this customer's expired sessions before considering a new one
