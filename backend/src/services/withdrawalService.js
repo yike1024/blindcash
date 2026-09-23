@@ -62,7 +62,7 @@ function hexToScalar(hex) {
  * @param {{id:string, customer_id:number, amount:number}} session
  * @param {'aborted'|'cancelled'|'expired'} newStatus
  */
-function refundAndClose(db, session, newStatus) {
+export function refundAndClose(db, session, newStatus) {
   db.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
     .run(session.amount, session.customer_id);
   db.prepare(`UPDATE withdrawal_sessions SET status = ? WHERE id = ?`)

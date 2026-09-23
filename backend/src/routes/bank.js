@@ -18,9 +18,11 @@
 
 import { Router } from 'express';
 import { authenticateJWT } from '../middleware/auth.js';
+import { requireRole } from '../middleware/requireRole.js';
 import { getActivePublicKey } from '../services/bankKeyService.js';
 import { deposit, BankServiceError } from '../services/bankService.js';
 import { processPayment, PaymentError } from '../services/paymentService.js';
+import { getDb } from '../models/db.js';
 import { bytesToHex } from '../utils/hex.js';
 
 const router = Router();
@@ -54,6 +56,43 @@ router.get('/pubkey', (_req, res) => {
     // Phase 3 多密钥轮换后此字段会随 active 切换而变化。
     key_id: 1,
   });
+});
+
+// GET /api/bank/reserve — 管理员查发行总量与准备金状态
+//
+// Phase 1 验收项（审查补充）：让管理员可查看银行的货币发行/回收/准备金
+// 状态，用于审计与教学演示。需 JWT + admin 角色。
+//
+// 返回的 in_flight 与 sum_balance 是实时计算的（非 bank_reserve 表里的
+// 存储值），便于管理员核对不变量：
+//   reserve_balance == sum_balance + (total_issued - total_redeemed) + in_flight
+router.get('/reserve', authenticateJWT, requireRole('admin'), (_req, res) => {
+  try {
+    const db = getDb();
+    const reserve = db.prepare(
+      `SELECT total_issued, total_redeemed, reserve_balance, updated_at
+       FROM bank_reserve WHERE id = 1`,
+    ).get();
+    const sumBalance = db.prepare(
+      `SELECT COALESCE(SUM(balance), 0) AS s FROM users`,
+    ).get().s;
+    const inFlight = db.prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS s
+       FROM withdrawal_sessions
+       WHERE status IN ('pending','submitted')`,
+    ).get().s;
+
+    return res.json({
+      total_issued: reserve.total_issued,
+      total_redeemed: reserve.total_redeemed,
+      reserve_balance: reserve.reserve_balance,
+      in_flight: inFlight,
+      sum_balance: sumBalance,
+      updated_at: reserve.updated_at,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  }
 });
 
 // POST /api/bank/deposit

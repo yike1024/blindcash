@@ -11,6 +11,7 @@ import cors from 'cors';
 import { getDb, closeDb } from './models/db.js';
 import { runMigrations } from './utils/migrationRunner.js';
 import { getOrGenerate } from './services/bankKeyService.js';
+import { startCleanupJob } from './services/sessionCleanupService.js';
 import { bytesToHex } from './utils/hex.js';
 
 import authRoutes from './routes/auth.js';
@@ -42,6 +43,12 @@ app.use(express.json({ limit: '1mb' }));
  * provision the singleton row in bank_keys. On first boot this generates a
  * fresh keypair; on subsequent boots it reads the existing row back (no
  * regeneration — would invalidate previously-issued tokens).
+ *
+ * Phase 1 缺陷修复 (方案 A): after runMigrations() + getOrGenerate(), start
+ * the global session cleanup job. It scans expired sessions hourly and
+ * refunds them so in-flight amounts don't hang forever. The returned stop()
+ * is registered on SIGINT/SIGTERM so the interval is cleared on graceful
+ * shutdown.
  */
 export function initDatabase() {
   closeDb();  // reset singleton against current BC_DB_PATH (in case it changed)
@@ -49,6 +56,13 @@ export function initDatabase() {
   runMigrations(db);
   const kp = getOrGenerate();
   console.log(`[backend] Bank public key: ${bytesToHex(kp.publicKey)}`);
+
+  // Phase 1 缺陷修复 (方案 A): start background cleanup job AFTER migrations
+  // (so withdrawal_sessions + bank_reserve tables exist). unref'd so it
+  // doesn't block process exit.
+  const stopCleanup = startCleanupJob();
+  process.on('SIGINT', stopCleanup);
+  process.on('SIGTERM', stopCleanup);
 }
 
 // Health check (namespaced under /api for consistency with the Vite proxy)
