@@ -50,8 +50,8 @@ k6 run tests/load/payment.k6.js
 
 | 场景 | VUs | P95 | P99 | 双花正确率 | 备注 |
 |------|-----|-----|-----|-----------|------|
-| 取款 init | 50 | _待填_ | _待填_ | N/A | amount=10, init+cancel 循环 |
-| 支付 | 50 | _待填_ | _待填_ | _待填_% | 200 tokens, 轮转制造双花 |
+| 取款 init | 50 | 79ms | 96ms | N/A | amount=10, init+cancel 循环, 16358 reqs / 8129 iterations |
+| 支付 | 50 | 83ms | 177ms | 100% | 50 tokens, 轮转制造双花, 3998 reqs (100×200 + 3898×409) |
 
 > 运行压测后填入实际数据。压测前用干净 DB（`docker compose down -v && docker compose up -d`）。
 

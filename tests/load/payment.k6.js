@@ -33,11 +33,12 @@ export const options = {
   },
 };
 
-// setup: 读 tokens.json + 为每个 VU 注册一个收款账户。
-// tokens.json 是预生成的 valid token 数组。
+// k6 的 open() 只能在 init 阶段（全局作用域）调用
+const tokensRaw = open('./tokens.json');
+
+// setup: 解析 tokens + 为每个 VU 注册一个收款账户
 export function setup() {
-  // 读 tokens.json（k6 的 open 是同步的）
-  const tokens = JSON.parse(open('./tokens.json'));
+  const tokens = JSON.parse(tokensRaw);
   console.log(`Loaded ${tokens.length} tokens`);
 
   // 为每个 VU 注册一个收款账户

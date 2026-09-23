@@ -51,8 +51,8 @@ export function setup() {
       continue;
     }
     const token = reg.json('token');
-    // deposit 10000 (够多次 init)
-    const dep = http.post(`${BASE_URL}/api/bank/deposit`, JSON.stringify({ amount: 10000 }), {
+    // deposit 1000 (MAX_DEPOSIT_PER_TX=1000)
+    const dep = http.post(`${BASE_URL}/api/bank/deposit`, JSON.stringify({ amount: 1000 }), {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
     });
     if (dep.status !== 200) {

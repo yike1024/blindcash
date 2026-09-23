@@ -13,7 +13,7 @@
 # 运行：docker compose up（见 docker-compose.yml）
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────
-FROM node:24-bookworm AS builder
+FROM node:22-bookworm AS builder
 
 WORKDIR /app
 
@@ -38,11 +38,10 @@ COPY . .
 RUN cd frontend && npm run build
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM node:24-bookworm-slim
+FROM node:22-bookworm
 
 WORKDIR /app
 
-# better-sqlite3 运行时不需要 python3/make/g++，但需要 libc（bookworm-slim 已含）。
 # 安装 tini 做 PID 1，处理信号转发（SIGTERM → cleanup job 优雅退出）。
 RUN apt-get update && apt-get install -y --no-install-recommends tini \
   && rm -rf /var/lib/apt/lists/*
