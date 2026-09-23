@@ -1,22 +1,30 @@
-// pages/Payment.jsx — 收款（粘贴 token → 本地预验签 → 存款）
+// pages/Payment.jsx — 收款（粘贴 token / 从钱包选 / 扫码 → 本地预验签 → 存款）
 //
-// ALL CRYPTO LOGIC, DEBOUNCED PREVIEW, VERIFY-SIG FLOW PRESERVED VERBATIM.
-// M7: 清除教学脚手架文案，角色锁已解锁（任何登录用户都能收款）。
+// M7: 角色解锁——任何登录用户都能收款。
+// Phase 2 §2.3: 新增"从钱包选择"模式（radio 切换），从 IndexedDB 钱包选
+//   token 自动填入。支付成功（200）后才从钱包删除该 token（按 serial 匹配）；
+//   网络超时/失败 → token 保留。409 DOUBLE_SPEND 时也自动删除（审查建议 3：
+//   409 = 服务端替你确认了它已花费）。
+// Phase 2 §2.4: 支持扫码——离线模式 <input type=file> + jsQR 解码。
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Input, Alert, Button, Space, Typography, Descriptions, Tag,
-  message, Result, Spin, Collapse,
+  message, Result, Spin, Collapse, Radio, Select, Upload,
 } from 'antd';
 import {
   CheckCircleTwoTone, CloseCircleTwoTone, CopyOutlined, ThunderboltOutlined,
+  ScanOutlined, WalletOutlined,
 } from '@ant-design/icons';
+import jsQR from 'jsqr';
 
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
 import { verifySig } from '@crypto/client/schnorrBlindClient.js';
 import { isValidCompressedFormat } from '@crypto/client/pointFormat.js';
 import { hexToBytes } from '@utils/hex.js';
+import { listCoins, getCoin, deleteCoin } from '../utils/walletDB.js';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -36,10 +44,6 @@ function cheapFormatCheck(tok) {
   if (typeof tok.s_prime !== 'string' || !HEX64_RE.test(tok.s_prime)) {
     return { ok: false, reason: 's_prime 必须是 64 位 hex 字符串' };
   }
-  // Phase 1 (v5 §三 1.7 token v2)：透传 key_id 字段（如有）。
-  // 老 token 没有 key_id → undefined → service 层走 getActivePublicKey()。
-  // 新 token v2 有 key_id=1 → service 层走 getPublicKeyByVersion(1)。
-  // Phase 1 两者返回同一把密钥；Phase 3 多密钥轮换后才会真正分流。
   const fields = {
     serial: tok.serial,
     amount: tok.amount,
@@ -73,14 +77,19 @@ function mapApiError(err, fallback = '收款失败') {
 
 export default function PaymentPage() {
   const { user, updateUser } = useAuth();
+  const [searchParams] = useSearchParams();
 
+  const [inputMode, setInputMode] = useState('paste'); // 'paste' | 'wallet'
   const [rawText, setRawText] = useState('');
   const [preview, setPreview] = useState({ phase: 'empty' });
   const publicKeyRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
   const [lastToken, setLastToken] = useState(null);
+  const [walletCoins, setWalletCoins] = useState([]);
+  const [selectedSerial, setSelectedSerial] = useState(null);
 
+  // Load bank public key for local pre-verify
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -97,6 +106,57 @@ export default function PaymentPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Load wallet coins when switching to wallet mode
+  const loadWallet = useCallback(async () => {
+    try {
+      const coins = await listCoins();
+      setWalletCoins(coins);
+    } catch (e) {
+      message.error(`加载钱包失败：${e.message}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (inputMode === 'wallet') {
+      loadWallet();
+    }
+  }, [inputMode, loadWallet]);
+
+  // If URL has ?serial=xxx, load that coin from wallet and switch to wallet mode
+  useEffect(() => {
+    const serial = searchParams.get('serial');
+    if (serial) {
+      setInputMode('wallet');
+      (async () => {
+        try {
+          const coin = await getCoin(serial);
+          if (coin) {
+            setSelectedSerial(serial);
+            setRawText(JSON.stringify(coin, null, 2));
+          } else {
+            message.warning('钱包中未找到此 token');
+          }
+        } catch {
+          message.warning('钱包中未找到此 token');
+        }
+      })();
+    }
+  }, [searchParams]);
+
+  // When a wallet coin is selected, fill rawText
+  const handleWalletSelect = useCallback(async (serial) => {
+    setSelectedSerial(serial);
+    try {
+      const coin = await getCoin(serial);
+      if (coin) {
+        setRawText(JSON.stringify(coin, null, 2));
+      }
+    } catch {
+      message.error('读取 token 失败');
+    }
+  }, []);
+
+  // Debounced local pre-verify (shared for paste + wallet modes)
   useEffect(() => {
     setResult(null);
     const text = rawText.trim();
@@ -142,7 +202,7 @@ export default function PaymentPage() {
           token: fmt.fields,
           verifyOk: ok,
           reason: ok
-            ? '本地预验签通过 (s\'·G == R\' + e\'·P)'
+            ? "本地预验签通过 (s'·G == R' + e'·P)"
             : '本地预验签失败：签名无效或字段被篡改',
         });
       } catch (e) {
@@ -152,6 +212,17 @@ export default function PaymentPage() {
 
     return () => clearTimeout(timer);
   }, [rawText]);
+
+  // Phase 2 §2.3: 支付成功后从钱包删除该 token（按 serial 匹配）。
+  // 409 DOUBLE_SPEND 时也删除——审查建议 3：409 = 服务端确认已花费，
+  // 前端自动清掉，避免用户重试拿到"钱没了"的困惑。
+  const removeFromWalletIfExists = useCallback(async (serial) => {
+    try {
+      await deleteCoin(serial);
+    } catch {
+      // token 不在钱包里（粘贴模式），忽略
+    }
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     if (preview.phase !== 'ok' || !preview.verifyOk) {
@@ -163,6 +234,8 @@ export default function PaymentPage() {
     try {
       const { data } = await api.post('/payment', preview.token);
       updateUser({ balance: data.new_balance });
+      // Phase 2: 200 成功才删 token
+      await removeFromWalletIfExists(preview.token.serial);
       setResult({
         kind: 'success',
         msg: `已成功收款 ${data.deposited}`,
@@ -172,11 +245,16 @@ export default function PaymentPage() {
       setLastToken(preview.token);
       message.success(`收款成功：+${data.deposited}`);
     } catch (e) {
+      const code = e?.response?.data?.error;
+      // 审查建议 3：409 = 服务端确认已花费，自动从钱包删除
+      if (code === 'DOUBLE_SPEND') {
+        await removeFromWalletIfExists(preview.token.serial);
+      }
       setResult({ kind: 'error', msg: mapApiError(e, '收款失败') });
     } finally {
       setSubmitting(false);
     }
-  }, [preview, updateUser]);
+  }, [preview, updateUser, removeFromWalletIfExists]);
 
   const handleResubmit = useCallback(async () => {
     if (!lastToken) return;
@@ -188,6 +266,7 @@ export default function PaymentPage() {
     } catch (e) {
       const code = e?.response?.data?.error;
       if (code === 'DOUBLE_SPEND') {
+        await removeFromWalletIfExists(lastToken.serial);
         setResult({
           kind: 'error',
           msg: '✓ 双花被服务器正确检测：409 DOUBLE_SPEND (serial 已在 spent_coins 表中)',
@@ -200,7 +279,7 @@ export default function PaymentPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [lastToken]);
+  }, [lastToken, removeFromWalletIfExists]);
 
   async function copyToken() {
     if (!preview.token) return;
@@ -212,6 +291,32 @@ export default function PaymentPage() {
     }
   }
 
+  // Phase 2 §2.4: 离线扫码——<input type=file> + jsQR 解码（无需 HTTPS/摄像头）
+  const handleScanFile = useCallback((file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code?.data) {
+          setRawText(code.data);
+          message.success('扫码成功，token 已填入');
+        } else {
+          message.error('未识别到二维码，请确保图片清晰');
+        }
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+    return false; // prevent antd Upload default upload
+  }, []);
+
   const previewBadge = (() => {
     if (preview.phase === 'empty') {
       return (
@@ -219,7 +324,7 @@ export default function PaymentPage() {
           type="info"
           showIcon
           message="将 token JSON 粘贴到下方文本框"
-          description="token 来自顾客取款向导第 ④ 步：{ serial, amount, R_prime, s_prime }。本地会立即做预验签，通过后才能提交存款。"
+          description="token 来自顾客取款向导第 ④ 步：{ serial, amount, R_prime, s_prime, key_id }。本地会立即做预验签，通过后才能提交存款。"
         />
       );
     }
@@ -261,15 +366,13 @@ export default function PaymentPage() {
 
   return (
     <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
-      {/* ── Page header ── */}
       <header className="bc-rise-1" style={{ marginBottom: 28 }}>
         <p className="bc-eyebrow" style={{ marginBottom: 10 }}>收款</p>
         <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
-          粘贴 token，本地预验签后存入
+          粘贴 / 扫码 / 从钱包选 token
         </h1>
       </header>
 
-      {/* ── Balance strip ── */}
       <section className="bc-card bc-rise-2" style={{ padding: '24px 28px', marginBottom: 24, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
         <div>
           <div className="bc-stat-label" style={{ marginBottom: 8 }}>当前余额</div>
@@ -288,22 +391,75 @@ export default function PaymentPage() {
         </div>
       </section>
 
-      {/* ── Safety banner ── */}
       <Alert
         className="bc-rise-2"
-        message="粘贴 token 后会自动本地预验签"
-        description="通过 ✓ 后才能提交存款。服务器仍会独立做 verifySig + 双花检测，本地结果不替代服务器判定。"
+        message="选择 token 输入方式"
+        description="粘贴 JSON、从钱包选择、或上传 QR 图片扫码。本地预验签通过后才能提交存款。"
         type="info"
         showIcon
         style={{ marginBottom: 24 }}
       />
 
-      {/* ── 粘贴 token ── */}
+      {/* ── 输入方式切换 ── */}
       <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
-        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>粘贴 Token JSON</h2>
+        <Radio.Group
+          value={inputMode}
+          onChange={(e) => setInputMode(e.target.value)}
+          optionType="button"
+          buttonStyle="solid"
+          style={{ marginBottom: 18 }}
+        >
+          <Radio.Button value="paste"><CopyOutlined /> 粘贴 JSON</Radio.Button>
+          <Radio.Button value="wallet"><WalletOutlined /> 从钱包选</Radio.Button>
+        </Radio.Group>
+
+        {/* 钱包选择模式 */}
+        {inputMode === 'wallet' && (
+          <div style={{ marginBottom: 16 }}>
+            <Select
+              style={{ width: '100%' }}
+              placeholder="从钱包选择一个 token…"
+              value={selectedSerial}
+              onChange={handleWalletSelect}
+              options={walletCoins.map((c) => ({
+                value: c.serial,
+                label: `${c.amount} BC · ${c.serial.slice(0, 12)}…${c.serial.slice(-6)}`,
+              }))}
+              notFoundContent="钱包为空，请先取款并存入钱包"
+            />
+            <Button
+              size="small"
+              style={{ marginTop: 8 }}
+              onClick={() => { setSelectedSerial(null); setRawText(''); }}
+            >
+              清除选择
+            </Button>
+          </div>
+        )}
+
+        {/* 粘贴/扫码 */}
+        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>
+          {inputMode === 'wallet' ? 'Token 内容' : '粘贴 Token JSON'}
+        </h2>
         <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
           client verify-sig · 300ms debounce
         </p>
+
+        {inputMode === 'paste' && (
+          <div style={{ marginBottom: 14 }}>
+            <Upload
+              accept="image/*"
+              showUploadList={false}
+              beforeUpload={handleScanFile}
+            >
+              <Button icon={<ScanOutlined />}>上传 QR 图片扫码</Button>
+            </Upload>
+            <Text type="secondary" style={{ fontSize: 12, marginLeft: 12 }}>
+              离线模式，无需摄像头/HTTPS
+            </Text>
+          </div>
+        )}
+
         <Paragraph type="secondary" style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>
           token v2 形如：<span className="bc-mono bc-scalar" style={{ display: 'inline', padding: '2px 6px' }}>
             {`{ "serial": "...64hex", "amount": 30, "R_prime": "...66hex", "s_prime": "...64hex", "key_id": 1 }`}
@@ -414,7 +570,7 @@ export default function PaymentPage() {
         </section>
       )}
 
-      {/* ── 双花演示说明（可折叠） ── */}
+      {/* ── 双花演示说明 ── */}
       <section className="bc-card" style={{ padding: 28 }}>
         <Collapse
           ghost

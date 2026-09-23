@@ -432,3 +432,40 @@ M2 `clientBuild.test.js` 在 happy-dom 下端到端跑 `generateBlinders + userC
 | `/payment` | PaymentPage | role='merchant' |
 
 未登录访问受保护路由 → 重定向 `/login`；角色不符 → antd Result 403。
+
+---
+
+## 9. 客户端钱包 XSS 威胁模型（Phase 2 m6 修正）
+
+### 9.1 钱包存储位置
+
+Phase 2 采用**方案 A**：钱包完全在客户端 IndexedDB，后端**无 wallet 表**、**无 /api/wallet/\*** 接口。银行对钱包内容完全无感知——这是 Chaum 式匿名性的关键（银行不能关联 serial → 用户身份）。
+
+### 9.2 XSS 风险
+
+IndexedDB **无加密**，token 以明文形式存储在浏览器中。如果应用存在 XSS 漏洞，攻击者可：
+
+1. 通过 `indexedDB.open('blindcash-wallet')` 读取所有 token
+2. 将 token 批量提交到攻击者控制的商户地址，一锅端用户所有电子现金
+
+### 9.3 本系统的威胁面评估
+
+| 因素 | 评估 |
+|---|---|
+| 攻击面 | 教学系统，无外部用户、无第三方脚本、无广告网络 |
+| CSP | 未设置严格 CSP（Vite dev 模式 + antd 内联样式） |
+| 输入处理 | React 默认转义，token JSON 走 `JSON.parse` 非 `innerHTML` |
+| 第三方依赖 | antd / axios / @noble / idb / qrcode / jsqr — 均为知名库 |
+
+**结论**：教学系统可接受。但必须诚实标注此限制——不能假装"钱包安全"。
+
+### 9.4 生产环境应采取的措施
+
+1. **加密存储**：用 WebCrypto API 派生密钥（PBKDF2 + 用户口令或设备绑定密钥），对 token 的 `serial`/`R_prime`/`s_prime` 字段做 AES-GCM 加密后再存 IndexedDB
+2. **严格 CSP**：`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'`（antd 需要 unsafe-inline 样式）
+3. **Token 隔离**：每个 token 单独加密，密钥派生时混入 serial，减少一锅端风险
+4. **自动过期**：钱包 token 设置 TTL，超时自动清除（需权衡用户体验）
+
+### 9.5 为什么不加密也要存 IndexedDB 而不是 sessionStorage
+
+sessionStorage 关标签页即丢失——token 直接消失，用户钱没了。IndexedDB 持久化是"功能正确性"的底线，加密是"安全增强"。教学系统选了"功能正确 + 诚实标注"的折中。

@@ -43,4 +43,12 @@ export default defineConfig({
       },
     },
   },
+  // Phase 2: vitest config for frontend unit tests (walletDB, etc.).
+  // happy-dom provides DOM APIs; fake-indexeddb is injected per-test-file
+  // because happy-dom itself has no IndexedDB.
+  test: {
+    environment: 'happy-dom',
+    globals: true,
+    include: ['src/**/*.{test,spec}.{js,jsx}'],
+  },
 })

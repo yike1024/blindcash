@@ -22,10 +22,11 @@ import {
   Steps, Form, InputNumber, Button, Alert, Space, Typography,
   Descriptions, message, Result, Spin, Input,
 } from 'antd';
-import { CopyOutlined, LockOutlined } from '@ant-design/icons';
+import { CopyOutlined, LockOutlined, WalletOutlined } from '@ant-design/icons';
 
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
+import { putCoin } from '../utils/walletDB.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '@crypto/client/blinding.js';
 import { hashToScalar } from '@crypto/server/hashToScalar.js';
 import { modN } from '@crypto/server/curve.js';
@@ -108,6 +109,8 @@ export default function WithdrawPage() {
   const [session, setSession] = useState(null);
   const [jIndex, setJIndex] = useState(null);
   const [token, setToken] = useState(null);
+  // Phase 2: 是否已存入钱包（防止重复存入）
+  const [savedToWallet, setSavedToWallet] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState('');
@@ -284,6 +287,7 @@ export default function WithdrawPage() {
     setSession(null);
     setJIndex(null);
     setToken(null);
+    setSavedToWallet(false);
     setStep(0);
     setAmount(null);
     blindersRef.current = [];
@@ -321,6 +325,26 @@ export default function WithdrawPage() {
       message.success('Token 已复制到剪贴板');
     } catch {
       message.error('复制失败，请手动选择文本复制');
+    }
+  }
+
+  // Phase 2 §2.2: 存入客户端 IndexedDB 钱包。
+  // 此操作不调用任何后端 API——银行无感知（方案 A 钱包在客户端，
+  // 否则银行可关联 serial → 用户身份，摧毁匿名性）。
+  async function handleSaveToWallet() {
+    if (!token) return;
+    try {
+      await putCoin(token);
+      setSavedToWallet(true);
+      message.success('Token 已存入钱包（IndexedDB）');
+    } catch (e) {
+      // ConstraintError = 同 serial 已在钱包中（重复存入无意义）
+      if (e?.name === 'ConstraintError' || e?.message?.includes('already')) {
+        setSavedToWallet(true);
+        message.info('此 Token 已在钱包中');
+      } else {
+        message.error(`存入钱包失败：${e.message}`);
+      }
     }
   }
 
@@ -527,6 +551,13 @@ export default function WithdrawPage() {
           </Descriptions>
           <Space style={{ marginTop: 20 }}>
             <Button type="primary" icon={<CopyOutlined />} onClick={copyToken}>复制完整 Token JSON</Button>
+            <Button
+              icon={<WalletOutlined />}
+              onClick={handleSaveToWallet}
+              disabled={savedToWallet}
+            >
+              {savedToWallet ? '✓ 已存入钱包' : '存入钱包'}
+            </Button>
             <Button onClick={() => navigate('/dashboard')}>返回仪表盘</Button>
           </Space>
           <Paragraph type="secondary" style={{ marginTop: 14, fontSize: 12, color: 'var(--text-muted)' }}>

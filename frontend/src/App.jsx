@@ -15,6 +15,7 @@ import DashboardPage from './pages/Dashboard.jsx';
 import WithdrawPage from './pages/Withdraw.jsx';
 import PaymentPage from './pages/Payment.jsx';
 import BankPage from './pages/Bank.jsx';
+import WalletPage from './pages/Wallet.jsx';
 import HistoryPage from './pages/History.jsx';
 
 export default function App() {
@@ -35,6 +36,8 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         {/* Phase 1: 银行充值/退币（任何登录用户都可自助充值模拟法币入账） */}
         <Route path="/bank" element={<BankPage />} />
+        {/* Phase 2: 客户端 IndexedDB 钱包（后端无感知，Chaum 匿名性关键） */}
+        <Route path="/wallet" element={<WalletPage />} />
         {/* M7: 角色解锁——任何登录用户都可取款 */}
         <Route path="/withdraw" element={<WithdrawPage />} />
         {/* M7: 角色解锁——任何登录用户都可收款 */}
