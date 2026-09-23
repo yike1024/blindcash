@@ -342,7 +342,55 @@ npx vitest run integration.test.js
 
 ---
 
-## 7. 参考文献
+## 7. Phase 4 增补：限流专项测试 + pino 结构化日志示例
+
+### 7.1 限流专项测试（rateLimit.test.js，5 用例）
+
+主测试套件的限流器都 `skip: () => isTest`（NODE_ENV=test 时 no-op），**不打死
+自己的 168 个测试**。但限流逻辑本身需要专项验证——否则 skip 让限流在主套件里
+隐形等于没验证。rateLimit.test.js 手动构造不复用 skip 的 limiter 实例：
+
+| 用例 | 验证点 |
+|------|--------|
+| authLimiter 第 6 次 → 429 + Retry-After | 5 req/min/IP 防爆破，第 6 次必拒 + RFC 9110 §15.5.14 Retry-After 头 |
+| txLimiter 已认证用户第 11 次 → 429 | 10 req/min/user，用 userId key（已认证路径） |
+| txLimiter 未认证回退到固定 key | 未认证请求仍能限流（IP 回退） |
+| standardHeaders RateLimit-* 头 | 429 响应带标准 RateLimit-Limit / RateLimit-Remaining |
+| 主 app /api/health 不被限流 | skip(isTest) 生效，连打 20 次 /api/health 全 200 |
+
+### 7.2 pino 结构化日志格式示例
+
+Phase 4 把 Phase 1 的 console 包装 logger 换成 pino，输出 JSON 一行一条。
+pino-http 自动给每个请求生成 req.id（UUID v4），并把 req/res 序列化写入日志。
+
+**GET /api/health 请求日志示例**（autoLogging.ignore 跳过 /api/health 的请求日志，
+但其他路径会记录）：
+
+```json
+{"level":30,"time":1790135064141,"pid":54360,"hostname":"yikecao","req":{"method":"GET","url":"/api/bank/pubkey","headers":{"host":"127.0.0.1:4100"}},"res":{"statusCode":200},"responseTime":12,"req_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","msg":"request completed"}
+```
+
+**错误日志示例**（兜底错误中间件带 req_id）：
+
+```json
+{"level":50,"time":1790135064141,"pid":54360,"hostname":"yikecao","err":{"name":"ReserveInvariantError","message":"reserve invariant violated","stack":"..."},"req_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","method":"POST","url":"/api/bank/deposit","status":500,"msg":"unhandled_error"}
+```
+
+**字段说明**：
+- `level`：pino 数值级别（30=info, 40=warn, 50=error, 60=fatal）
+- `time`：Unix 毫秒时间戳
+- `pid`/`hostname`：进程标识，便于多实例日志聚合
+- `req_id`：pino-http 生成的 UUID v4，贯穿请求生命周期，便于追踪
+- `responseTime`：毫秒级响应耗时
+
+**文献参考**：
+- NIST SP 800-92rev1 §3 — 审计日志应含 timestamp + event type + actor + outcome
+- OWASP ASVS L1 v4.0.31 §7.1.1 — 所有认证事件必须记录
+- RFC 9110 §15.5.14 — 429 响应应带 Retry-After 头
+
+---
+
+## 8. 参考文献
 
 - v3 实施大纲 §5（M2-M7 测试矩阵）
 - RFC 6979 — 确定性 nonce 生成
@@ -350,3 +398,6 @@ npx vitest run integration.test.js
 - Shannon entropy — *A Mathematical Theory of Communication* (1948)
 - vitest 文档 — https://vitest.dev/
 - @noble/curves 测试范式 — https://paulmillr.com/noble/
+- RFC 9110 §15.5.14 — 429 Too Many Requests + Retry-After
+- NIST SP 800-92rev1 §3 — 审计日志安全要求
+- OWASP ASVS L1 v4.0.31 §11.1.1 — 速率限制要求

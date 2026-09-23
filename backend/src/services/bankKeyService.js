@@ -317,6 +317,12 @@ export function getPublicKeyByVersion(v) {
  */
 function checkRetired(entry, v) {
   if (entry.status === 'retired' && entry.retired_until) {
+    // Q4 (Phase 2/3 验收)：retired_until 在 rotateKey() 里用
+    // `toISOString().replace('T',' ').slice(0,19)` 写入，格式为
+    // 'YYYY-MM-DD HH:MM:SS' 且是 UTC（toISOString 本身是 UTC）。
+    // SQLite DATETIME 默认就是 UTC 无时区后缀，读取时必须补 'Z' 让
+    // Date 解析为 UTC 而非本地时区。**未来如果有人改成用
+    // toLocaleString() 存储就会炸——这里加 Z 是因为存储侧保证了 UTC**。
     const until = new Date(entry.retired_until + 'Z').getTime();
     if (Date.now() > until) {
       throw new BankKeyError(403, 'KEY_RETIRED',
