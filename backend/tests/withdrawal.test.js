@@ -130,13 +130,14 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
 }
 
 /** Full 4-move happy path, returning the final token + intermediates. */
-async function runFull4Move(amount = 30) {
-  const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount } });
+async function runFull4Move(amount = 10) {
+  const denomination = amount;
+  const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount, denomination } });
   expect(init.status).toBe(201);
   const { session_id, R, N } = init.body;
 
-  const pub = await api('/api/bank/pubkey');
-  const publicKeyHex = pub.body.public_key;
+  const pubRes = await api('/api/bank/pubkeys');
+  const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
   const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id, candidates } });
@@ -222,18 +223,18 @@ afterAll(async () => {
 // ════════════════════════════════════════════════════════════════
 
 describe('M4: 4-move withdrawal — happy path', () => {
-  it('full 4-move flow: balance 100 → withdraw 30 → 70, verifySig passes', async () => {
-    const result = await runFull4Move(30);
+  it('full 4-move flow: balance 100 → withdraw 10 → 90, verifySig passes', async () => {
+    const result = await runFull4Move(10);
     expect(result.valid).toBe(true);
     const db = getDb();
     const user = db.prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(user.balance).toBe(70);
+    expect(user.balance).toBe(90);
     const sess = db.prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(result.session_id);
     expect(sess.status).toBe('committed');
   });
 
   it('token verifySig: (R\', s\') verifies locally after unblind', async () => {
-    const result = await runFull4Move(25);
+    const result = await runFull4Move(10);
     expect(result.valid).toBe(true);
     const tampered = result.sPrime + 1n;
     const bad = verifySig(result.RPrimeJ, tampered, result.serialJ, result.amount, result.publicKey);
@@ -247,13 +248,17 @@ describe('M4: 4-move withdrawal — happy path', () => {
 
 describe('M4: validation errors', () => {
   it('insufficient balance → 400', async () => {
-    const res = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 200 } });
+    // balance 100 < amount 100 is false, so reset balance to 0 to test
+    // INSUFFICIENT_BALANCE (100 仍在白名单内但 > balance).
+    const db = getDb();
+    resetBalancesAndReserve(db);
+    const res = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 100, denomination: 100 } });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('INSUFFICIENT_BALANCE');
   });
 
   it('amount ≤ 0 → 400', async () => {
-    const res = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 0 } });
+    const res = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 0, denomination: 1 } });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('INVALID_AMOUNT');
   });
@@ -261,7 +266,7 @@ describe('M4: validation errors', () => {
   it('merchant calls init → 201 (M7: 角色锁已解锁，任何登录用户都能取款)', async () => {
     // Phase 1: fund merchant via deposit so they can withdraw.
     fundUser(merchantId, 100);
-    const res = await api('/api/withdraw/init', { method: 'POST', token: merchantToken, body: { amount: 10 } });
+    const res = await api('/api/withdraw/init', { method: 'POST', token: merchantToken, body: { amount: 10, denomination: 10 } });
     expect(res.status).toBe(201);
     expect(res.body.amount).toBe(10);
     // 清理：取消该 session 退回余额
@@ -271,19 +276,19 @@ describe('M4: validation errors', () => {
   });
 
   it('candidate count ≠ N → 400', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
     // submit only N-1 candidates
-    const { candidates } = clientBuildCandidates(init.body.R.slice(0, -1), 30, pub.body.public_key);
+    const { candidates } = clientBuildCandidates(init.body.R.slice(0, -1), 10, pub.body.public_key);
     const res = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('CANDIDATE_COUNT');
   });
 
   it('reveal i-set incomplete (N-2 instead of N-1) → 400', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
-    const { candidates, blinders } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates, blinders } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     const submit = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     const j = submit.body.j;
 
@@ -305,7 +310,7 @@ describe('M4: validation errors', () => {
   });
 
   it('duplicate reveal (committed session re-revealed) → 409', async () => {
-    const result = await runFull4Move(30);
+    const result = await runFull4Move(10);
     const revealed = [];
     for (let i = 0; i < result.N; i++) {
       if (i === result.j) continue;
@@ -316,9 +321,9 @@ describe('M4: validation errors', () => {
   });
 
   it('cut-and-choose tamper (wrong alpha) → 400 + refund', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
-    const { candidates, blinders } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates, blinders } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     const submit = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     const j = submit.body.j;
 
@@ -352,9 +357,9 @@ describe('M4: validation errors', () => {
 
 describe('M4: [必测#1] blindness invariant 3 — α/β must not leave user device', () => {
   it('submit payload carries alpha field → 400', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
-    const { candidates } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     candidates[0].alpha = '0'.repeat(64);
     const res = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     expect(res.status).toBe(400);
@@ -362,9 +367,9 @@ describe('M4: [必测#1] blindness invariant 3 — α/β must not leave user dev
   });
 
   it('submit payload carries beta field → 400', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
-    const { candidates } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     candidates[3].beta = '0'.repeat(64);
     const res = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     expect(res.status).toBe(400);
@@ -372,9 +377,9 @@ describe('M4: [必测#1] blindness invariant 3 — α/β must not leave user dev
   });
 
   it('reveal payload carries j-candidate → 400', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
-    const { candidates, blinders } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates, blinders } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     const submit = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     const j = submit.body.j;
 
@@ -399,9 +404,9 @@ describe('M4: [必测#1] blindness invariant 3 — α/β must not leave user dev
 
 describe('M4: [必测#2] session uniqueness invariant 4', () => {
   it('second init while one pending → 409', async () => {
-    const first = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const first = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     expect(first.status).toBe(201);
-    const second = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 20 } });
+    const second = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     expect(second.status).toBe(409);
     expect(second.body.error).toBe('ACTIVE_SESSION_EXISTS');
   });
@@ -413,28 +418,28 @@ describe('M4: [必测#2] session uniqueness invariant 4', () => {
 
 describe('M4: [必测#3] expired session lazy-cleanup refund', () => {
   it('abandoned session, TTL elapse, next init triggers refund', async () => {
-    const first = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const first = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     expect(first.status).toBe(201);
     const db = getDb();
     let user = db.prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(user.balance).toBe(70);
+    expect(user.balance).toBe(90);
 
     expireSession(first.body.session_id);
 
-    const second = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 20 } });
+    const second = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     expect(second.status).toBe(201);
-    // refund 70→100, new debit 100→80
+    // refund 90→100, new debit 100→90
     user = db.prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(user.balance).toBe(80);
+    expect(user.balance).toBe(90);
     const oldSess = db.prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(first.body.session_id);
     expect(oldSess.status).toBe('expired');
   });
 
   it('submit on expired session → 400 + refund', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     expireSession(init.body.session_id);
     const pub = await api('/api/bank/pubkey');
-    const { candidates } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     const res = await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('SESSION_EXPIRED');
@@ -450,10 +455,10 @@ describe('M4: [必测#3] expired session lazy-cleanup refund', () => {
 
 describe('M4: cancel flow', () => {
   it('cancel pending session → refund + cancelled', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const res = await api('/api/withdraw/cancel', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id } });
     expect(res.status).toBe(200);
-    expect(res.body.refunded).toBe(30);
+    expect(res.body.refunded).toBe(10);
     expect(res.body.new_balance).toBe(100);
     const db = getDb();
     const sess = db.prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(init.body.session_id);
@@ -461,13 +466,13 @@ describe('M4: cancel flow', () => {
   });
 
   it('cancel submitted session → refund + cancelled', async () => {
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const pub = await api('/api/bank/pubkey');
-    const { candidates } = clientBuildCandidates(init.body.R, 30, pub.body.public_key);
+    const { candidates } = clientBuildCandidates(init.body.R, 10, pub.body.public_key);
     await api('/api/withdraw/submit', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id, candidates } });
     const res = await api('/api/withdraw/cancel', { method: 'POST', token: customerToken, body: { session_id: init.body.session_id } });
     expect(res.status).toBe(200);
-    expect(res.body.refunded).toBe(30);
+    expect(res.body.refunded).toBe(10);
     const db = getDb();
     const sess = db.prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(init.body.session_id);
     expect(sess.status).toBe('cancelled');
@@ -476,7 +481,7 @@ describe('M4: cancel flow', () => {
   it('merchant cancel customer session → 404 (M7: 角色锁已解锁，但 session 归属仍隔离)', async () => {
     // 角色锁虽解锁，但 cancelWithdrawal 查询带 customer_id = req.user.userId，
     // merchant 不是 session 的 owner → 查不到 → 404 SESSION_NOT_FOUND
-    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 30 } });
+    const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 } });
     const res = await api('/api/withdraw/cancel', { method: 'POST', token: merchantToken, body: { session_id: init.body.session_id } });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('SESSION_NOT_FOUND');
@@ -485,7 +490,7 @@ describe('M4: cancel flow', () => {
   });
 
   it('cancel committed session → 400 (irreversible)', async () => {
-    const result = await runFull4Move(30);
+    const result = await runFull4Move(10);
     const res = await api('/api/withdraw/cancel', { method: 'POST', token: customerToken, body: { session_id: result.session_id } });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('NOT_CANCELLABLE');

@@ -192,7 +192,7 @@
 | NFR-5 | **服务器事务原子性**：余额变动 + 双花写入要么全成要么全败 | `runImmediateTx` + `BEGIN IMMEDIATE` |
 | NFR-6 | **跨标签会话隔离**：customer / merchant 两标签同时登录互不干扰 | `sessionStorage` per-tab 缓存 token+user |
 | NFR-7 | **公开可验证**：任何访客都能用 P 验证 token 真伪 | `GET /api/bank/pubkey` 无 auth |
-| NFR-8 | **测试覆盖**：核心协议 + 双花 + 跨用户 + 盲性证据全覆盖 | 104/104 通过（8 文件）|
+| NFR-8 | **测试覆盖**：核心协议 + 双花 + 跨用户 + 盲性证据全覆盖 | 207/207 通过（18 文件，含前端 18 合计 225）|
 | NFR-9 | **前端构建 0 错误**：vite build + oxlint 双 0 | M6 step1/step2 验证 |
 | NFR-10 | **教学可读性**：代码注释解释"为什么"而非"是什么" | 每个关键文件头部 comment block |
 
@@ -223,6 +223,6 @@
 | 伪造 token 必被验签拒绝 | M5 `SIGNATURE_INVALID` 测试 |
 | 同 token 重复提交必失败 | M5 + M7 `DOUBLE_SPEND` 测试 |
 | 跨用户 session 隔离 | M7 `SESSION_NOT_FOUND` 测试 |
-| 全量测试 0 失败 | `npm test` → 104/104 |
+| 全量测试 0 失败 | `npm test` → 207/207 |
 | 前端 build 0 错误 | `cd frontend && npx vite build` exit 0 |
 | 浏览器完整 E2E 跑通 | 教授 M6.md #5 路径：register → withdraw → 复制 → 粘贴 → 预验签 → 提交 → 重试 409 |

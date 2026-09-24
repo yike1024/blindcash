@@ -364,3 +364,170 @@ h1, h2, h3, h4, h5 { font-family: var(--font-display); font-weight: 600; letter-
 .ant-input-affix-wrapper, .ant-input, .ant-input-number { font-family: var(--font-body) !important; }
 .ant-form-item-label > label { font-family: var(--font-mono) !important; font-size: 11px !important; letter-spacing: 0.12em !important; text-transform: uppercase !important; color: var(--text-secondary) !important; }
 .ant-typography code, .ant-typography .ant-typography-copy { font-family: var(--font-mono) !important; }
+
+/* ── Button overflow fix: prevent buttons from exceeding card boundaries ── */
+/* Cards use box-sizing: border-box (global reset), but antd Space + Button
+   combos can still overflow on narrow viewports. These rules ensure
+   wrapping + max-width containment. */
+.bc-card .ant-space,
+.bc-card .ant-space-item {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+.bc-card .ant-btn-wrapper { max-width: 100%; }
+
+/* ── Table action column: prevent button overflow ── */
+.ant-table-cell-action .ant-space {
+  flex-wrap: wrap;
+  gap: var(--sp-1) !important;
+}
+.ant-table-cell-action .ant-btn {
+  font-size: 12px;
+  padding: 0 var(--sp-2);
+}
+
+/* ── Header nav responsive: wrap on narrow screens ── */
+@media (max-width: 1100px) {
+  .ant-layout-header:has(.bc-nav-link) {
+    flex-wrap: wrap;
+    height: auto !important;
+    padding-top: var(--sp-2) !important;
+    padding-bottom: var(--sp-2) !important;
+    line-height: 1.5 !important;
+  }
+  .ant-layout-header:has(.bc-nav-link) nav {
+    gap: var(--sp-3) !important;
+  }
+}
+
+/* ── Card section overflow guard: ensure padding never pushes content out ── */
+.bc-card {
+  overflow: hidden;
+  max-width: 100%;
+}
+.bc-card > section,
+.bc-card > div {
+  min-width: 0;
+}
+
+/* ── Space wrap fix for inline button groups ── */
+.ant-space {
+  flex-wrap: wrap;
+}
+.ant-space-horizontal {
+  row-gap: var(--sp-1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   动画选项卡首页枢纽
+   - bc-tabbar: 顶部选项卡容器，position:relative 承载滑动指示器
+   - bc-tabbar__indicator: 金色下划线，transform translateX 跟随激活项
+   - bc-panel-enter: 面板进场动画（opacity + translateY，合成层属性）
+   遵循 hyperframes-keyframes：有限时长、确定性延迟、仅合成属性
+   ═══════════════════════════════════════════════════════════════════ */
+.bc-tabbar {
+  position: relative;
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--ink-700);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  overflow: hidden;
+}
+
+.bc-tab {
+  position: relative;
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+  white-space: nowrap;
+}
+.bc-tab:hover {
+  color: var(--paper-100);
+  background: rgba(255, 255, 255, 0.03);
+}
+.bc-tab--active {
+  color: var(--gold-400);
+}
+.bc-tab__icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.bc-tab__label {
+  letter-spacing: 0.02em;
+}
+.bc-tab__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--crimson-400);
+  color: #fff;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+
+/* 滑动指示器：绝对定位，transition transform 实现平滑位移 */
+.bc-tabbar__indicator {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--gold-400), var(--gold-300));
+  transition: transform var(--dur-med) var(--ease-out),
+              width var(--dur-med) var(--ease-out);
+  pointer-events: none;
+}
+
+/* ── 面板进场动画：淡入 + 上移 ── */
+@keyframes bc-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.bc-panel-stage {
+  min-height: 200px;
+}
+.bc-panel-enter {
+  animation: bc-panel-enter var(--dur-med) var(--ease-out) both;
+}
+
+/* ── 小屏：选项卡横向滚动，避免压缩 ── */
+@media (max-width: 720px) {
+  .bc-tabbar {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .bc-tabbar::-webkit-scrollbar { display: none; }
+  .bc-tab {
+    flex: 0 0 auto;
+    padding: 12px 16px;
+  }
+  .bc-tabbar__indicator {
+    display: none; /* 移动端隐藏滑动指示器，改由激活态背景反馈 */
+  }
+  .bc-tab--active {
+    background: rgba(229, 179, 107, 0.08);
+  }
+}

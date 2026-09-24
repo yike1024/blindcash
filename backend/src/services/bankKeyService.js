@@ -84,7 +84,18 @@ function decryptPrivateKey(encBlob) {
   const ct = buf.subarray(12, buf.length - 16);
   const decipher = createDecipheriv('aes-256-gcm', _masterKeyBuf, nonce);
   decipher.setAuthTag(tag);
-  return new Uint8Array(Buffer.concat([decipher.update(ct), decipher.final()]));
+  try {
+    return new Uint8Array(Buffer.concat([decipher.update(ct), decipher.final()]));
+  } catch {
+    throw new Error(
+      'bankKeyService: failed to decrypt bank_keys.private_key — ' +
+      'the stored ciphertext was encrypted under a different BC_MASTER_KEY. ' +
+      'This usually means BC_MASTER_KEY is unset (ephemeral key) but the DB ' +
+      'was written by a previous run. Either (a) set BC_MASTER_KEY to the ' +
+      'same 64-hex value used originally, or (b) delete the dev database ' +
+      'and re-bootstrap.'
+    );
+  }
 }
 
 /**

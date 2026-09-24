@@ -19,7 +19,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Steps, Form, InputNumber, Button, Alert, Space, Typography,
+  Steps, Form, Button, Alert, Space, Typography,
   Descriptions, message, Result, Spin, Input, Radio,
 } from 'antd';
 import { CopyOutlined, LockOutlined, WalletOutlined } from '@ant-design/icons';
@@ -32,6 +32,7 @@ import { hashToScalar } from '@crypto/server/hashToScalar.js';
 import { modN } from '@crypto/server/curve.js';
 import { bytesToHex, hexToBytes } from '@utils/hex.js';
 import { TOKEN_DOMAIN_TAG } from '@crypto/client/protocolConstants.js';
+import CollapsibleHint from '../components/CollapsibleHint.jsx';
 
 const { Text, Paragraph } = Typography;
 
@@ -104,7 +105,6 @@ export default function WithdrawPage() {
   const navigate = useNavigate();
 
   const [step, setStep] = useState(0);
-  const [amount, setAmount] = useState(null);
   const [denomination, setDenomination] = useState(1);
 
   const [session, setSession] = useState(null);
@@ -150,10 +150,12 @@ export default function WithdrawPage() {
     setLoadingLabel('正在发起取款会话…');
     setError(null);
     try {
-      if (!Number.isInteger(amount) || amount <= 0) {
-        throw Object.assign(new Error('amount'), { response: { data: { error: 'INVALID_AMOUNT' } } });
+      // Phase 6.1 语义修正：面额 = 取款金额 = token 面值。
+      // 一次取款产一枚该面额的 token，amount 不再独立输入。
+      if (!Number.isInteger(denomination) || denomination <= 0) {
+        throw Object.assign(new Error('denom'), { response: { data: { error: 'INVALID_AMOUNT' } } });
       }
-      if (amount > (user?.balance ?? 0)) {
+      if (denomination > (user?.balance ?? 0)) {
         throw Object.assign(new Error('balance'), { response: { data: { error: 'INSUFFICIENT_BALANCE' } } });
       }
       const pubRes = await api.get('/bank/pubkeys');
@@ -167,7 +169,7 @@ export default function WithdrawPage() {
       const publicKeyHex = pubKeyData.public_key;
       const publicKey = hexToBytes(publicKeyHex);
 
-      const { data } = await api.post('/withdraw/init', { amount, denomination });
+      const { data } = await api.post('/withdraw/init', { amount: denomination, denomination });
       const expires_at = new Date(Date.now() + data.ttl_ms).toISOString();
       const newSession = {
         session_id: data.session_id,
@@ -182,7 +184,7 @@ export default function WithdrawPage() {
       };
       setSession(newSession);
       sessionActiveRef.current = true;
-      updateUser({ balance: (user?.balance ?? 0) - amount });
+      updateUser({ balance: (user?.balance ?? 0) - denomination });
       message.success('会话已建立，进入下一步');
       setStep(1);
     } catch (e) {
@@ -191,7 +193,7 @@ export default function WithdrawPage() {
       setLoading(false);
       setLoadingLabel('');
     }
-  }, [amount, denomination, user, updateUser]);
+  }, [denomination, user, updateUser]);
 
   // ────────────────────────────────────────────────────────────────────
   // ② clientBuildCandidates + submit
@@ -301,7 +303,6 @@ export default function WithdrawPage() {
     setToken(null);
     setSavedToWallet(false);
     setStep(0);
-    setAmount(null);
     setDenomination(1);
     blindersRef.current = [];
     candidatesRef.current = [];
@@ -381,27 +382,27 @@ export default function WithdrawPage() {
         </h1>
       </header>
 
-      {/* ── Safety banner ── */}
-      <Alert
-        className="bc-rise-2"
-        message={
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-            <LockOutlined style={{ color: 'var(--gold-400)' }} />
-            盲化因子 α/β 仅存于本页内存
-          </span>
-        }
-        description="刷新 / 关闭页面将丢失 α/β，本次取款会作废。如需中止，请点击下方「取消取款」按钮（会退还余额至账户）。"
-        type="warning"
-        showIcon={false}
-        action={
-          session && step < 3 ? (
-            <Button size="small" danger onClick={handleCancel} loading={loading}>
-              取消取款
-            </Button>
-          ) : null
-        }
-        style={{ marginBottom: 24 }}
-      />
+      {/* ── Safety banner (collapsible) ── */}
+      <div className="bc-rise-2">
+        <CollapsibleHint
+          title={
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <LockOutlined style={{ color: 'var(--gold-400)' }} />
+              盲化因子 α/β 仅存于本页内存
+            </span>
+          }
+          tone="gold"
+          action={
+            session && step < 3 ? (
+              <Button size="small" danger onClick={handleCancel} loading={loading}>
+                取消取款
+              </Button>
+            ) : null
+          }
+        >
+          刷新 / 关闭页面将丢失 α/β，本次取款会作废。如需中止，请点击上方「取消取款」按钮（会退还余额至账户）。
+        </CollapsibleHint>
+      </div>
 
       {/* ── Steps ── */}
       <div className="bc-card bc-rise-2" style={{ padding: '20px 24px', marginBottom: 24 }}>
@@ -453,21 +454,25 @@ export default function WithdrawPage() {
         </div>
       )}
 
-      {/* ── Step 0: 输入金额 ── */}
+      {/* ── Step 0: 选面额 = 取款金额 ── */}
       {step === 0 && (
         <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
-          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>① 发起取款会话</h2>
+          <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>① 选择面额并发起取款</h2>
           <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 20 }}>
             POST /api/withdraw/init
           </p>
           {error && <Alert message={error} type="error" showIcon closable onClose={() => setError(null)} style={{ marginBottom: 16 }} />}
           <Form layout="vertical" autoComplete="off" requiredMark={false}>
-            <Form.Item label="面额" extra="不同面额使用不同签名密钥（Phase 6.1 多面额密钥）">
+            <Form.Item
+              label="选择面额（= 取款金额 = token 面值）"
+              extra={`一次取款产 1 枚该面额的 token。当前余额：${user?.balance ?? 0} BC（需先到银行充值）`}
+            >
               <Radio.Group
                 value={denomination}
                 onChange={(e) => setDenomination(e.target.value)}
                 optionType="button"
                 buttonStyle="solid"
+                size="large"
               >
                 <Radio.Button value={1}>1 BC</Radio.Button>
                 <Radio.Button value={5}>5 BC</Radio.Button>
@@ -476,35 +481,25 @@ export default function WithdrawPage() {
                 <Radio.Button value={100}>100 BC</Radio.Button>
               </Radio.Group>
             </Form.Item>
-            <Form.Item
-              label="取款金额"
-              extra={`当前余额：${user?.balance ?? 0}（顾客初始 100）`}
-              rules={[
-                { required: true, message: '请输入取款金额' },
-                {
-                  validator: (_, v) => {
-                    if (v == null) return Promise.resolve();
-                    if (!Number.isInteger(v)) return Promise.reject(new Error('金额必须为正整数'));
-                    if (v <= 0) return Promise.reject(new Error('金额必须大于 0'));
-                    if (v > (user?.balance ?? 0)) return Promise.reject(new Error('金额不能超过当前余额'));
-                    return Promise.resolve();
-                  },
-                },
-              ]}
-            >
-              <InputNumber
-                style={{ width: 220 }}
-                min={1}
-                step={1}
-                precision={0}
-                placeholder="如 30"
-                value={amount}
-                onChange={(v) => setAmount(v)}
-              />
-            </Form.Item>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 20 }}
+              message={`你将取款 ${denomination} BC（1 枚 ${denomination} BC 面额的 token）`}
+              description={denomination > (user?.balance ?? 0)
+                ? <span style={{ color: 'var(--danger-400)' }}>余额不足！当前余额 {user?.balance ?? 0} BC &lt; {denomination} BC，请先到银行充值。</span>
+                : `取款后余额将变为 ${(user?.balance ?? 0) - denomination} BC。不同面额使用不同签名密钥，面额越大匿名集越小。`
+              }
+            />
             <Form.Item>
-              <Button type="primary" onClick={handleInit} loading={loading} disabled={amount == null}>
-                {loading ? loadingLabel : '发起取款'}
+              <Button
+                type="primary"
+                size="large"
+                onClick={handleInit}
+                loading={loading}
+                disabled={denomination > (user?.balance ?? 0)}
+              >
+                {loading ? loadingLabel : `发起取款 ${denomination} BC`}
               </Button>
             </Form.Item>
           </Form>

@@ -1,3 +1,16 @@
 node_modules/
 *.log
 .env
+
+# 前端构建产物
+frontend/dist/
+frontend/dist-ssr/
+
+# 后端数据（SQLite，含 -wal/-shm）
+backend/data/*.db
+backend/data/*.db-*
+
+# 本地工具
+cloudflared.exe
+*.tgz
+

@@ -7,6 +7,7 @@
 
 import { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import api from '../api/client.js';
+import { resetWalletDb } from '../utils/walletDB.js';
 
 const AuthContext = createContext(null);
 
@@ -31,6 +32,9 @@ export function AuthProvider({ children }) {
     sessionStorage.setItem('bc_user', JSON.stringify(userValue));
     setToken(tokenValue);
     setUser(userValue);
+    // Reset the wallet DB connection so the new user's per-user database
+    // (blindcash-wallet-${userValue.id}) is opened on next access.
+    resetWalletDb();
   }, []);
 
   // M6: partial-update the cached user (e.g. after /withdraw/init debits
@@ -50,6 +54,9 @@ export function AuthProvider({ children }) {
     sessionStorage.removeItem('bc_user');
     setToken(null);
     setUser(null);
+    // Reset the wallet DB connection so the next login opens the correct
+    // per-user database.
+    resetWalletDb();
   }, []);
 
   const value = {

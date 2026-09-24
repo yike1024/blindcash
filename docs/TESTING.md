@@ -1,13 +1,13 @@
 # BlindCash 测试文档（TESTING）
 
-> 内容：146 用例分类表 + 盲性证据 + 双花演示 + 测试环境
+> 内容：207 用例分类表 + 盲性证据 + 双花演示 + 测试环境
 > 关联：[REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN.md](./DESIGN.md) | [IMPLEMENTATION.md](./IMPLEMENTATION.md) | [ISOLATION.md](../ISOLATION.md)
 
 ---
 
-## 1. 测试用例分类总表（146 例）
+## 1. 测试用例分类总表（207 例）
 
-> 10 个测试文件，共 146 个 `it` / `test` 用例。Phase 1 新增 `bank.test.js`（19）+ `bankReserveService.test.js`（7）并扩充原有文件，使总数从 M7 的 104 增至 146。
+> 18 个测试文件，共 207 个 `it` / `test` 用例。Phase 1 起陆续新增 `bank.test.js`、`bankReserveService.test.js`、`auditService.test.js`、`migrationRunner.test.js`、`transactions.test.js`、`multiDenomination.test.js`、`redeemSplit.test.js`、`privacy.test.js`、`admin.test.js`、`rateLimit.test.js`，使总数从 M7 的 104 增至 207。
 
 ### 1.1 按里程碑与文件分布
 
@@ -17,13 +17,21 @@
 | `blinding.test.js` | M2 | 9 | generateBlinders / computeBlindedCommitment / unblindResponse 客户端原语 |
 | `cutAndChoose.test.js` | M2 | 18 | verifyRevealed 单候选 + verifyAllRevealed + pickRandomJ 分布 + N=10 作弊场景 + **1000-trial 盲性证据** |
 | `clientBuild.test.js` | M2 | 4 | vite build 0 errors + happy-dom 浏览器可跑性 |
-| `bankKeyService.test.js` | M3 | 12 | 单行 singleton + 第二次启动读取同密钥 + 公钥格式 + `/api/bank/pubkey` 端点 |
+| `bankKeyService.test.js` | M3 | 20 | 单行 singleton + 第二次启动读取同密钥 + 公钥格式 + `/api/bank/pubkey` 端点 + 多面额密钥 |
 | `withdrawal.test.js` | M4 | 19 | 4-move happy path + 校验 + **教授 3 必测**（α/β 不离开设备、session 唯一性、过期懒清理）+ cancel |
 | `payment.test.js` | M5 | 13 | happy path + H3 双花 vs 重试 + H1 畸形 token + 篡改金额 + 角色守卫 + 初始余额 |
 | `integration.test.js` | M7 | 10 | 全栈 E2E + 跨用户拒绝 + 并发双花 + 过期懒清理 + 配置 sanity |
-| `bank.test.js` | Phase 1 | 19 | deposit service + `/api/bank/deposit` + `/api/bank/redeem` 路由 |
+| `transactions.test.js` | M7 | 8 | 账本流水 + 角色解锁闭环（customer 存款 / merchant 取款）|
+| `bank.test.js` | Phase 1 | 19 | deposit service + `/api/bank/deposit` + `/api/bank/redeem` 路由 + 双花 |
 | `bankReserveService.test.js` | Phase 1 | 7 | assertInvariant 正常 / 破坏 / 回滚 / in-flight |
-| **合计** | | **146** | |
+| `auditService.test.js` | Phase 3 | 4 | 审计日志写入 + 查询 |
+| `admin.test.js` | Phase 3 | 5 | 审计查询 + 密钥轮换 |
+| `migrationRunner.test.js` | Phase 0 | 5 | 迁移幂等 + 顺序 + 失败回滚 |
+| `rateLimit.test.js` | Phase 4 | 5 | 三级限流（global/auth/tx）+ 测试环境 skip |
+| `multiDenomination.test.js` | Phase 6 | 11 | 多面额签发 + 面额匹配 + 密钥版本 |
+| `redeemSplit.test.js` | Phase 6 | 15 | 找零拆分 + 面额整除 + 双花 + 审计 |
+| `privacy.test.js` | Phase 6 | 16 | 匿名集分析 + 面额/密钥版本不可区分性 |
+| **合计** | | **207** | |
 
 ### 1.2 按测试类型分布
 
@@ -230,7 +238,7 @@ $$
 ### 4.3 运行命令
 
 ```bash
-# 全量测试（146 用例）
+# 全量测试（207 用例）
 npm test
 
 # 监听模式
@@ -258,8 +266,8 @@ npx vitest run integration.test.js
  ✓ 19 tests passed (bank)
  ✓  7 tests passed (bankReserveService)
 
- Test Files  10 passed (10)
-      Tests  146 passed (146)
+ Test Files  18 passed (18)
+      Tests  207 passed (207)
 ```
 
 ### 4.5 已知噪声

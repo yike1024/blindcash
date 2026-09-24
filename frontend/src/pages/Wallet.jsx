@@ -16,15 +16,16 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table, Button, Space, Tag, Typography, Popconfirm, message, Empty,
-  Statistic, Row, Col, Alert, Modal,
+  Statistic, Row, Col, Modal,
 } from 'antd';
 import {
-  WalletOutlined, CopyOutlined, QrcodeOutlined, SendOutlined,
+  WalletOutlined, CopyOutlined, QrcodeOutlined,
   DeleteOutlined, ClearOutlined,
 } from '@ant-design/icons';
 import QRCode from 'qrcode';
 
 import { listCoins, deleteCoin, clearAll, totalBalance } from '../utils/walletDB.js';
+import CollapsibleHint from '../components/CollapsibleHint.jsx';
 
 const { Text, Paragraph } = Typography;
 
@@ -116,18 +117,17 @@ export default function WalletPage() {
     {
       title: '操作',
       key: 'action',
-      width: 260,
+      width: 240,
       render: (_, coin) => (
-        <Space size="small">
+        <Space size="small" wrap>
           <Button size="small" icon={<CopyOutlined />} onClick={() => copyToken(coin)}>复制</Button>
-          <Button size="small" icon={<QrcodeOutlined />} onClick={() => showQr(coin)}>QR</Button>
           <Button
             size="small"
             type="primary"
-            icon={<SendOutlined />}
-            onClick={() => navigate(`/payment?serial=${coin.serial}`)}
+            icon={<QrcodeOutlined />}
+            onClick={() => showQr(coin)}
           >
-            支付
+            出示
           </Button>
           <Popconfirm
             title="从此钱包删除此 Token？"
@@ -154,14 +154,11 @@ export default function WalletPage() {
         </h1>
       </header>
 
-      <Alert
-        className="bc-rise-2"
-        message="钱包存储在浏览器本地（IndexedDB）"
-        description="银行无法看到你的钱包内容——这是 Chaum 式匿名性的关键。关闭标签页重开 token 仍在。注意：XSS 攻击可窃取钱包内所有 token（教学系统可接受，生产环境应加密存储）。"
-        type="info"
-        showIcon
-        style={{ marginBottom: 24 }}
-      />
+      <div className="bc-rise-2">
+        <CollapsibleHint title="钱包存储在浏览器本地（IndexedDB）" tone="emerald">
+          银行无法看到你的钱包内容——这是 Chaum 式匿名性的关键。点击「出示」生成 QR 码，让商户扫码收款。钱包按账号隔离，不同登录用户互不可见。
+        </CollapsibleHint>
+      </div>
 
       {/* ── 汇总 ── */}
       <Row gutter={16} className="bc-rise-2" style={{ marginBottom: 24 }}>
@@ -224,12 +221,12 @@ export default function WalletPage() {
       {/* ── QR 模态框 ── */}
       <Modal
         open={qrModal.open}
-        title="Token QR 码"
+        title="出示 Token QR 码给商户"
         onCancel={() => setQrModal({ open: false, dataUrl: '', coin: null })}
         footer={
           <Space>
             <Button onClick={() => qrModal.coin && copyToken(qrModal.coin)}>复制 Token JSON</Button>
-            <Button onClick={() => setQrModal({ open: false, dataUrl: '', coin: null })}>关闭</Button>
+            <Button type="primary" onClick={() => setQrModal({ open: false, dataUrl: '', coin: null })}>关闭</Button>
           </Space>
         }
       >
@@ -240,8 +237,12 @@ export default function WalletPage() {
               alt="token QR code"
               style={{ maxWidth: '100%', border: '1px solid var(--border)', padding: 12, background: '#fff' }}
             />
-            <Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
-              收款方扫码或上传此图片即可解析 token。纠错等级 M（密度与容错平衡）。
+            <Paragraph type="secondary" style={{ marginTop: 12, fontSize: 13, lineHeight: 1.7 }}>
+              <b>付款流程：</b>顾客出示此 QR → 商户在「收款」页点击「上传 QR 图片扫码」→
+              本地预验签 → 提交银行 → 银行验签+查双花 → 商户余额增加。
+            </Paragraph>
+            <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+              此过程是<b>离线</b>的——银行不参与出示环节，盲签名保证不可追踪。纠错等级 M。
             </Paragraph>
           </div>
         )}

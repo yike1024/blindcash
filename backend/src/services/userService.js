@@ -32,8 +32,8 @@ export const INITIAL_BALANCE_CUSTOMER = 0;
  * Create a new user (INSERT into users).
  * Caller is responsible for hashing the password BEFORE calling this.
  *
- * Initial balance: customer → 100 (教学用), merchant → 0 (only /payment
- * credits merchant.balance — ISOLATION §一-2).
+ * Initial balance: customer → 0 (Phase 1: 需 /api/bank/deposit 自助充值),
+ * merchant → 0 (only /payment credits merchant.balance — ISOLATION §一-2).
  *
  * @param {string} username pseudonym (unique)
  * @param {string} passwordHash bcrypt hash

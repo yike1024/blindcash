@@ -151,6 +151,14 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
     throw new WithdrawalError(400, 'INVALID_DENOMINATION',
       `denomination must be one of ${DENOMINATIONS.join(', ')}, got ${denomination}`);
   }
+  // Phase 6.1 语义校验：面额 = token 面值 = 取款金额。一次取款产一枚
+  // 该面额的 token。amount 必须等于 denomination，否则面额选择无意义
+  //（选了 1 BC 密钥却签 50 BC 的 token 会导致验签通过但面额不匹配）。
+  if (amount !== denomination) {
+    throw new WithdrawalError(400, 'AMOUNT_DENOMINATION_MISMATCH',
+      `amount (${amount}) must equal denomination (${denomination}); ` +
+      'one withdrawal produces one token of the selected denomination');
+  }
 
   // ① lazy-cleanup this customer's expired sessions before considering a new one
   lazyCleanupExpiredSessions(customer_id);

@@ -93,9 +93,10 @@ function expireSession(sessionId) {
  * @param {number} amount
  * @returns {Promise<{ token: {serial,amount,R_prime,s_prime}, session_id, R, N, j }>}
  */
-async function runFull4Move(customerToken, publicKeyHex, amount = 30) {
+async function runFull4Move(customerToken, publicKeyHex, amount = 10) {
+  const denomination = amount;
   const init = await api('/api/withdraw/init', {
-    method: 'POST', token: customerToken, body: { amount },
+    method: 'POST', token: customerToken, body: { amount, denomination },
   });
   expect(init.status).toBe(201);
   const { session_id, R, N } = init.body;
@@ -155,6 +156,7 @@ async function runFull4Move(customerToken, publicKeyHex, amount = 30) {
       amount,
       R_prime: candidates[j].R_prime,
       s_prime: scalarToHexFixed(sPrime),
+      key_id: init.body.key_id,
     },
     session_id,
     R, N, j,
@@ -245,56 +247,57 @@ afterAll(async () => {
 // 1. FULL E2E: customer register → withdraw → merchant deposit → balance
 // ═══════════════════════════════════════════════════════════════════════
 describe('M7 · full end-to-end flow', () => {
-  it('customer register (HTTP, balance=100) → withdraw 30 → merchant deposit → balance 70 / 30', async () => {
-    // fetch bank pubkey (unauthenticated)
-    const pub = await api('/api/bank/pubkey');
+  it('customer funded 100 → withdraw 10 → merchant deposit → balance 90 / 10', async () => {
+    // fetch bank pubkey for denomination 10 (unauthenticated)
+    const pub = await api('/api/bank/pubkeys');
     expect(pub.status).toBe(200);
-    const publicKeyHex = pub.body.public_key;
+    const publicKeyHex = pub.body.denominations['10'].public_key;
 
-    // customer withdraws 30 → unblinded token
-    const { token } = await runFull4Move(customerToken, publicKeyHex, 30);
+    // customer withdraws 10 → unblinded token
+    const { token } = await runFull4Move(customerToken, publicKeyHex, 10);
 
-    // customer balance should be 70 (100 - 30 debited at init)
+    // customer balance should be 90 (100 - 10 debited at init)
     const customer = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(customer.balance).toBe(70);
+    expect(customer.balance).toBe(90);
 
     // merchant A deposits the token
     const dep = await api('/api/payment', {
       method: 'POST', token: merchantAToken, body: token,
     });
     expect(dep.status).toBe(200);
-    expect(dep.body.deposited).toBe(30);
-    expect(dep.body.new_balance).toBe(30);
+    expect(dep.body.deposited).toBe(10);
+    expect(dep.body.new_balance).toBe(10);
 
     // customer unchanged by deposit (only merchant balance moves via /payment)
     const customerAfter = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(customerAfter.balance).toBe(70);
+    expect(customerAfter.balance).toBe(90);
     const merchantA = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantAId);
-    expect(merchantA.balance).toBe(30);
+    expect(merchantA.balance).toBe(10);
 
     // spent_coins has 1 row with the serial
     const spent = getDb().prepare('SELECT serial FROM spent_coins').get();
     expect(spent.serial.length).toBe(32); // Buffer(32)
   });
 
-  it('customer register → immediately withdraw (教授风险#1: 初始余额+取款 race)', async () => {
-    // This exercises the initial-balance mechanism: register gives balance=100
-    // synchronously inside createUser (userService.js), so the very next /withdraw
-    // call must see balance=100. There is no separate "claim balance" endpoint
-    // (professor's risk note was based on a slight misunderstanding — but we
-    // still cover the path to prove no race).
-    const pub = await api('/api/bank/pubkey');
-    const { token } = await runFull4Move(customerToken, pub.body.public_key, 25);
+  it('customer register → immediately withdraw (教授风险#1: 充值+取款 race)', async () => {
+    // This exercises the initial-balance mechanism: customer registers with
+    // balance=0 (Phase 1), then beforeEach calls fundUser(customerId, 100) via
+    // /api/bank/deposit. The very next /withdraw call must see balance=100.
+    // There is no separate "claim balance" endpoint (professor's risk note was
+    // based on a slight misunderstanding — but we still cover the path to
+    // prove no race between deposit and withdraw).
+    const pub = await api('/api/bank/pubkeys');
+    const { token } = await runFull4Move(customerToken, pub.body.denominations['10'].public_key, 10);
 
     const customer = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(customer.balance).toBe(75); // 100 - 25
+    expect(customer.balance).toBe(90); // 100 - 10
 
     // merchant can deposit
     const dep = await api('/api/payment', {
       method: 'POST', token: merchantAToken, body: token,
     });
     expect(dep.status).toBe(200);
-    expect(dep.body.deposited).toBe(25);
+    expect(dep.body.deposited).toBe(10);
   });
 });
 
@@ -307,7 +310,7 @@ describe('M7 · cross-user access denied', () => {
     const publicKeyHex = pub.body.public_key;
     // customer (alice) opens a session
     const init = await api('/api/withdraw/init', {
-      method: 'POST', token: customerToken, body: { amount: 10 },
+      method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
     });
     expect(init.status).toBe(201);
     const { session_id, R, N } = init.body;
@@ -343,7 +346,7 @@ describe('M7 · cross-user access denied', () => {
 
   it('customer B cannot cancel customer A\'s session_id → 404', async () => {
     const init = await api('/api/withdraw/init', {
-      method: 'POST', token: customerToken, body: { amount: 10 },
+      method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
     });
     expect(init.status).toBe(201);
     const { session_id } = init.body;
@@ -367,7 +370,7 @@ describe('M7 · cross-user access denied', () => {
     // Phase 1: fund merchant via deposit so they can withdraw.
     fundUser(merchantAId, 100);
     const init = await api('/api/withdraw/init', {
-      method: 'POST', token: merchantAToken, body: { amount: 10 },
+      method: 'POST', token: merchantAToken, body: { amount: 10, denomination: 10 },
     });
     expect(init.status).toBe(201);
     // 清理
@@ -393,8 +396,8 @@ describe('M7 · cross-user access denied', () => {
 // ═══════════════════════════════════════════════════════════════════════
 describe('M7 · concurrent double-spend across two merchants', () => {
   it('1 token to merchant A + B concurrently → one 200, one 409 (order not guaranteed)', async () => {
-    const pub = await api('/api/bank/pubkey');
-    const { token } = await runFull4Move(customerToken, pub.body.public_key, 40);
+    const pub = await api('/api/bank/pubkeys');
+    const { token } = await runFull4Move(customerToken, pub.body.denominations['10'].public_key, 10);
 
     // Fire both deposits concurrently. We do NOT assert which one wins —
     // professor's M6.md #2 explicitly says "时序不确定, 不保证先发起者赢".
@@ -407,11 +410,11 @@ describe('M7 · concurrent double-spend across two merchants', () => {
     const statuses = [resA.status, resB.status].sort();
     expect(statuses).toEqual([200, 409]);
 
-    // The 200 winner's balance += 40; the 409 loser's balance stays 0.
+    // The 200 winner's balance += 10; the 409 loser's balance stays 0.
     const merchantA = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantAId);
     const merchantB = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantBId);
     const balances = [merchantA.balance, merchantB.balance].sort();
-    expect(balances).toEqual([0, 40]);
+    expect(balances).toEqual([0, 10]);
 
     // Exactly one spent_coins row (the 200 winner's INSERT committed)
     const spent = getDb().prepare('SELECT COUNT(*) AS n FROM spent_coins').get();
@@ -428,31 +431,31 @@ describe('M7 · concurrent double-spend across two merchants', () => {
 // ═══════════════════════════════════════════════════════════════════════
 describe('M7 · expired session lazy-cleanup', () => {
   it('TTL elapse → next init refunds old session + opens new one', async () => {
-    // alice opens a session for 30
+    // alice opens a session for 10
     const init1 = await api('/api/withdraw/init', {
-      method: 'POST', token: customerToken, body: { amount: 30 },
+      method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
     });
     expect(init1.status).toBe(201);
     const { session_id: oldSessionId } = init1.body;
-    // balance debited to 70
+    // balance debited to 90
     const after1 = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(after1.balance).toBe(70);
+    expect(after1.balance).toBe(90);
 
     // ── fast-forward: mark old session as expired ──
     expireSession(oldSessionId);
 
-    // alice starts a new session for 20 — lazyCleanupExpiredSessions should
-    // refund the old 30 (70 → 100) BEFORE debiting the new 20 (100 → 80).
+    // alice starts a new session for 10 — lazyCleanupExpiredSessions should
+    // refund the old 10 (90 → 100) BEFORE debiting the new 10 (100 → 90).
     const init2 = await api('/api/withdraw/init', {
-      method: 'POST', token: customerToken, body: { amount: 20 },
+      method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
     });
     expect(init2.status).toBe(201);
     const { session_id: newSessionId } = init2.body;
     expect(newSessionId).not.toBe(oldSessionId);
 
-    // Final balance: 100 (refunded) - 20 (new debit) = 80
+    // Final balance: 100 (refunded) - 10 (new debit) = 90
     const after2 = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(after2.balance).toBe(80);
+    expect(after2.balance).toBe(90);
 
     // Old session is now 'expired', new session is 'pending'
     const oldSess = getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(oldSessionId);
@@ -464,7 +467,7 @@ describe('M7 · expired session lazy-cleanup', () => {
   it('submit on expired session → 400 SESSION_EXPIRED + refund', async () => {
     const pub = await api('/api/bank/pubkey');
     const init = await api('/api/withdraw/init', {
-      method: 'POST', token: customerToken, body: { amount: 15 },
+      method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
     });
     expect(init.status).toBe(201);
     const { session_id, R, N } = init.body;
@@ -481,7 +484,7 @@ describe('M7 · expired session lazy-cleanup', () => {
       const RPrime = computeBlindedCommitment(RBytes, bl.alpha, bl.beta, publicKey);
       const serial = new Uint8Array(32);
       globalThis.crypto.getRandomValues(serial);
-      const ePrime = hashToScalar(TOKEN_DOMAIN_TAG, RPrime, serial, 15, publicKey);
+      const ePrime = hashToScalar(TOKEN_DOMAIN_TAG, RPrime, serial, 10, publicKey);
       const e = modN(ePrime + bl.beta);
       candidates.push({
         e: scalarToHexFixed(e),
@@ -496,7 +499,7 @@ describe('M7 · expired session lazy-cleanup', () => {
     expect(submit.status).toBe(400);
     expect(submit.body.error).toBe('SESSION_EXPIRED');
 
-    // balance refunded: 100 (initial was 100 - 15 = 85, refund → 100)
+    // balance refunded: 100 (initial was 100 - 10 = 90, refund → 100)
     const alice = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(alice.balance).toBe(100);
 

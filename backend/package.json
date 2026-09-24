@@ -4,12 +4,12 @@
   "description": "BlindCash backend - Chaumian eCash with Schnorr blind signatures",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
   "main": "src/app.js",
   "scripts": {
-    "dev": "nodemon src/app.js",
-    "start": "node src/app.js",
+    "dev": "nodemon --env-file-if-exists=.env src/app.js",
+    "start": "node --env-file-if-exists=.env src/app.js",
     "init:db": "node src/models/initDb.js",
     "test": "vitest run",
     "test:watch": "vitest"

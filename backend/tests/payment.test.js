@@ -7,7 +7,7 @@
 //   ✓ malformed token ×4: serial 63hex / R' prefix 04 / s' 63hex / amount=0 → 400 (H1)
 //   ✓ tampered amount → SIGNATURE_INVALID 400
 //   ✓ customer calls /api/payment → 403 (ISOLATION §一-2 role guard)
-//   ✓ initial balance: register customer → balance=100
+//   ✓ initial balance: register customer → balance=0, then fundUser(100) via deposit
 //   ✓ missing field → 400 VALIDATION_ERROR
 //   ✓ unauthenticated call → 401
 //
@@ -115,13 +115,14 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
  *   { serialHex, amount, R_primeHex, s_primeHex }
  * plus the bigint/bytes intermediates for tamper tests.
  */
-async function mintToken(amount = 30) {
-  const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount } });
+async function mintToken(amount = 10) {
+  const denomination = amount;
+  const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount, denomination } });
   expect(init.status).toBe(201);
   const { session_id, R, N } = init.body;
 
-  const pub = await api('/api/bank/pubkey');
-  const publicKeyHex = pub.body.public_key;
+  const pubRes = await api('/api/bank/pubkeys');
+  const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
   const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', {
@@ -153,6 +154,7 @@ async function mintToken(amount = 30) {
     R_primeHex:  candidates[j].R_prime,
     s_primeHex:  scalarToHexFixed(sPrime),
     amount,
+    keyId:       init.body.key_id,
     // bigint/bytes forms for tamper tests
     sPrime,
     RPrimeBytes: hexToBytes(candidates[j].R_prime),
@@ -216,24 +218,24 @@ afterAll(async () => {
 // ════════════════════════════════════════════════════════════════
 
 describe('M5: payment — happy path', () => {
-  it('customer withdraw 30 → merchant deposits → merchant=30, customer=70', async () => {
-    const tok = await mintToken(30);
+  it('customer withdraw 10 → merchant deposits → merchant=10, customer=90', async () => {
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {
         serial: tok.serialHex, amount: tok.amount,
-        R_prime: tok.R_primeHex, s_prime: tok.s_primeHex,
+        R_prime: tok.R_primeHex, s_prime: tok.s_primeHex, key_id: tok.keyId, key_id: tok.keyId,
       },
     });
     expect(res.status).toBe(200);
-    expect(res.body.deposited).toBe(30);
-    expect(res.body.new_balance).toBe(30);
+    expect(res.body.deposited).toBe(10);
+    expect(res.body.new_balance).toBe(10);
 
     const db = getDb();
     const m = db.prepare('SELECT balance FROM users WHERE id = ?').get(merchant1Id);
-    expect(m.balance).toBe(30);
+    expect(m.balance).toBe(10);
     const c = db.prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
-    expect(c.balance).toBe(70);  // withdrawn 30 from initial 100
+    expect(c.balance).toBe(90);  // withdrawn 10 from initial 100
     const sc = db.prepare('SELECT COUNT(*) AS n FROM spent_coins').get();
     expect(sc.n).toBe(1);
   });
@@ -245,10 +247,10 @@ describe('M5: payment — happy path', () => {
 
 describe('M5: [H3] double-spend vs retry semantics', () => {
   it('two different merchants concurrent same token → 200 + 409 (true double-spend)', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const body = {
       serial: tok.serialHex, amount: tok.amount,
-      R_prime: tok.R_primeHex, s_prime: tok.s_primeHex,
+      R_prime: tok.R_primeHex, s_prime: tok.s_primeHex, key_id: tok.keyId,
     };
     // Fire both concurrently — BEGIN IMMEDIATE serializes them; the second
     // to acquire the write lock sees the spent row and 409s.
@@ -261,23 +263,23 @@ describe('M5: [H3] double-spend vs retry semantics', () => {
     // Exactly one merchant got the deposit; the other got nothing.
     const ok = r1.status === 200 ? r1 : r2;
     const bad = r1.status === 200 ? r2 : r1;
-    expect(ok.body.deposited).toBe(30);
+    expect(ok.body.deposited).toBe(10);
     expect(bad.body.error).toBe('DOUBLE_SPEND');
 
     const db = getDb();
-    // Total merchant balance incremented by exactly 30 (no double-credit).
+    // Total merchant balance incremented by exactly 10 (no double-credit).
     const m1 = db.prepare('SELECT balance FROM users WHERE id = ?').get(merchant1Id);
     const m2 = db.prepare('SELECT balance FROM users WHERE id = ?').get(merchant2Id);
-    expect(m1.balance + m2.balance).toBe(30);
+    expect(m1.balance + m2.balance).toBe(10);
     const sc = db.prepare('SELECT COUNT(*) AS n FROM spent_coins').get();
     expect(sc.n).toBe(1);
   });
 
   it('same merchant re-submits same token → 409 (retry semantics, NOT a bug)', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const body = {
       serial: tok.serialHex, amount: tok.amount,
-      R_prime: tok.R_primeHex, s_prime: tok.s_primeHex,
+      R_prime: tok.R_primeHex, s_prime: tok.s_primeHex, key_id: tok.keyId,
     };
     const r1 = await api('/api/payment', { method: 'POST', token: merchant1Token, body });
     expect(r1.status).toBe(200);
@@ -287,7 +289,7 @@ describe('M5: [H3] double-spend vs retry semantics', () => {
     // Merchant balance unchanged after the failed retry.
     const db = getDb();
     const m = db.prepare('SELECT balance FROM users WHERE id = ?').get(merchant1Id);
-    expect(m.balance).toBe(30);
+    expect(m.balance).toBe(10);
   });
 });
 
@@ -297,7 +299,7 @@ describe('M5: [H3] double-spend vs retry semantics', () => {
 
 describe('M5: [H1] malformed token format gate → 400 before verifySig', () => {
   it('serial 63 hex chars → 400 MALFORMED_TOKEN', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {
@@ -312,7 +314,7 @@ describe('M5: [H1] malformed token format gate → 400 before verifySig', () => 
   });
 
   it("R_prime prefix 04 (uncompressed) → 400 MALFORMED_TOKEN", async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {
@@ -327,7 +329,7 @@ describe('M5: [H1] malformed token format gate → 400 before verifySig', () => 
   });
 
   it('s_prime 63 hex chars → 400 MALFORMED_TOKEN', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {
@@ -342,7 +344,7 @@ describe('M5: [H1] malformed token format gate → 400 before verifySig', () => 
   });
 
   it('amount = 0 → 400 MALFORMED_TOKEN', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {
@@ -363,17 +365,17 @@ describe('M5: [H1] malformed token format gate → 400 before verifySig', () => 
 
 describe('M5: tampered amount → verifySig fails 400', () => {
   it('valid token with amount bumped by 1 → 400 SIGNATURE_INVALID', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     // Sanity: the untampered token verifies locally.
-    const validLocal = verifySig(tok.RPrimeBytes, tok.sPrime, tok.serialBytes, 30, tok.publicKey);
+    const validLocal = verifySig(tok.RPrimeBytes, tok.sPrime, tok.serialBytes, 10, tok.publicKey);
     expect(validLocal).toBe(true);
 
-    // Tamper: bump amount to 31 — the signature no longer matches.
+    // Tamper: bump amount to 11 — the signature no longer matches.
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {
         serial: tok.serialHex,
-        amount: 31,  // tampered!
+        amount: 11,  // tampered!
         R_prime: tok.R_primeHex,
         s_prime: tok.s_primeHex,
       },
@@ -398,34 +400,34 @@ describe('M5/M7: role guard unlocked + authentication', () => {
   it('customer calls /api/payment → 200 (M7: 角色锁已解锁，任何登录用户都能收款)', async () => {
     // 原来 customer 被 merchant 角色锁挡在 403；M7 解锁后 customer 也能存 token。
     // 这样顾客取款后能把 token 转给另一个顾客存款，形成 Chaum 式闭环。
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: customerToken,
       body: {
         serial: tok.serialHex, amount: tok.amount,
-        R_prime: tok.R_primeHex, s_prime: tok.s_primeHex,
+        R_prime: tok.R_primeHex, s_prime: tok.s_primeHex, key_id: tok.keyId, key_id: tok.keyId,
       },
     });
     expect(res.status).toBe(200);
-    expect(res.body.deposited).toBe(30);
-    // customer 取款 30 (100→70) 又存回 30 (70→100)，余额回到 100
+    expect(res.body.deposited).toBe(10);
+    // customer 取款 10 (100→90) 又存回 10 (90→100)，余额回到 100
     expect(res.body.new_balance).toBe(100);
   });
 
   it('unauthenticated call (no token) → 401', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST',  // no token
       body: {
         serial: tok.serialHex, amount: tok.amount,
-        R_prime: tok.R_primeHex, s_prime: tok.s_primeHex,
+        R_prime: tok.R_primeHex, s_prime: tok.s_primeHex, key_id: tok.keyId, key_id: tok.keyId,
       },
     });
     expect(res.status).toBe(401);
   });
 
   it('missing field (no R_prime) → 400 VALIDATION_ERROR', async () => {
-    const tok = await mintToken(30);
+    const tok = await mintToken(10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchant1Token,
       body: {

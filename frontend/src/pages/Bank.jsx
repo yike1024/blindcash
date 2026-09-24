@@ -24,6 +24,7 @@ import api from '../api/client.js';
 import { verifySig } from '@crypto/client/schnorrBlindClient.js';
 import { isValidCompressedFormat } from '@crypto/client/pointFormat.js';
 import { hexToBytes } from '@utils/hex.js';
+import CollapsibleHint from '../components/CollapsibleHint.jsx';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -173,10 +174,8 @@ function DepositTab({ updateUser }) {
 
   return (
     <div style={{ paddingTop: 8 }}>
-      <Alert
-        className="bc-rise-2"
-        message="模拟法币入账（simulated fiat rail）"
-        description={
+      <div className="bc-rise-2">
+        <CollapsibleHint title="模拟法币入账（simulated fiat rail）" tone="gold">
           <Space direction="vertical" size="small">
             <Text>
               自助充值模拟外部法币存入。单次上限
@@ -189,11 +188,8 @@ function DepositTab({ updateUser }) {
               充值后 reserve_balance 与 SUM(users.balance) 同步增加，assertInvariant 自动校验。
             </Text>
           </Space>
-        }
-        type="info"
-        showIcon
-        style={{ marginBottom: 24 }}
-      />
+        </CollapsibleHint>
+      </div>
 
       <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
         <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>输入充值金额</h2>

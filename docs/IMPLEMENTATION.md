@@ -13,7 +13,7 @@
 | **M2** | 密码学层 | `crypto/server/curve.js`（secp256k1）、`hashToScalar.js`（域分离 tag）、`schnorrBlind.js`（4-move bankStep1/3 + verifySig）、`crypto/client/blinding.js`（generateBlinders / computeBlindedCommitment / unblindResponse）、`cutAndChoose.js`（verifyRevealed + pickRandomJ） | — | 50 |
 | **M3** | 银行密钥层 | `bank_keys` 表（singleton）、`bankKeyService.js`（getOrGenerate + assertKeypairConsistent）、`/api/bank/pubkey`（无认证公开）、`initDb.js`、`app.js` 启动时初始化 | c0ae174 | 12（累计 62） |
 | **M4** | 取款层 | `withdrawal_sessions` 表（状态机 + 部分 UNIQUE 索引）、`withdrawalService.js`（init/submit/reveal/cancel + lazyCleanup）、`/api/withdraw/*` 4 路由（customerGuard）、`WithdrawalError` | 9b76aba | 19（累计 81） |
-| **M5** | 支付层 | `spent_coins` 表、`paymentService.js`（formatGate H1 + computeTokenHash H2 + processPayment H3）、`/api/payment`（merchantGuard）、初始余额 100（userService.js） | a01ba90 | 13（累计 94） |
+| **M5** | 支付层 | `spent_coins` 表、`paymentService.js`（formatGate H1 + computeTokenHash H2 + processPayment H3）、`/api/payment`（merchantGuard）、初始余额（M5 时为 100，Phase 1 改为 0 + 自助充值，见 userService.js） | a01ba90 | 13（累计 94） |
 | **M6** | 前端 E2E | `Withdraw.jsx`（4-step Steps + α/β useRef + TTL 倒计时 + beforeunload 守卫 + mapApiError）、`Payment.jsx`（粘贴 token + 300ms debounce 预验签 + 双花 409 演示）、`AuthContext.jsx`（updateUser）、`AppLayout.jsx`（role 菜单）、`vite.config.js`（@crypto/@config/@utils 别名 + fs.allow） | 20c6699 / 96c258f | clientBuild 4/4 + oxlint 0/0 + vite build 0 errors |
 | **M7** | 集成测试 + 文档 | `integration.test.js`（10 用例：E2E + 跨用户 + 并发双花 + 过期懒清理 + 配置 sanity）、`clientBuild.test.js` 注释澄清、docs 四件套、ISOLATION.md 补证据 | b6fc0c7 | 10（累计 104） |
 
@@ -161,7 +161,7 @@
 
 | # | 风险 | 等级 | 处置 | 落地证据 |
 |---|------|------|------|----------|
-| #1 | 初始余额并发竞态（多 customer 同时注册同时取款，初始 100 信用可能扣超） | H | INITIAL_BALANCE_CUSTOMER 在 INSERT 时即写入，无独立 UPDATE 步骤；取款时 `runImmediateTx` 包裹 SELECT balance → UPDATE → INSERT session，写锁互斥 | `userService.js` register 函数、`withdrawalService.initWithdrawal` |
+| #1 | 初始余额并发竞态（多 customer 同时充值同时取款，余额可能扣超） | H | Phase 1 后注册 balance=0，充值（deposit）与取款均由 `runImmediateTx` 包裹 SELECT balance → UPDATE → INSERT，写锁互斥 | `userService.js` register 函数、`bankService.deposit`、`withdrawalService.initWithdrawal` |
 | #2 | `/attack` 演示页缺失 | M | M7 阶段三（可选）补；当前文档中明确说明双花演示通过双标签页手动操作完成 | `docs/TESTING.md` 双花演示节 |
 | #3 | α/β useRef 仅 React 内存，非进程隔离 | H | 见 §2.3 显式 caveat；教学语境下可接受 | `docs/IMPLEMENTATION.md` §2.3 |
 | #4 | cut-and-choose N=10 演示降速 | M | 默认 N=100，仅 BC_DEMO_N=10 时降速；docs 显式标注 demo only | `config/bank.js`、`docs/IMPLEMENTATION.md` §2.4 |
@@ -195,7 +195,7 @@ npm run install:all          # 安装前后端依赖
 npm run init:db              # 初始化 SQLite schema
 npm run dev                  # concurrently 启动 backend(4100) + frontend(5174)
 BC_DEMO_N=10 npm run dev     # 演示模式（cut-and-choose N=10）
-npm test                     # 后端 vitest 全量测试（104 用例）
+npm test                     # 后端 vitest 全量测试（207 用例）
 ```
 
 ---

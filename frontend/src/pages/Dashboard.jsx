@@ -1,232 +1,207 @@
-// pages/Dashboard.jsx — vault-style welcome surface
+// pages/Dashboard.jsx — 动画选项卡首页枢纽
 //
-// Renders the signed-in user a calm, legible overview: greeting, balance as
-// the hero number, role/username metadata, and a single primary action that
-// matches the role (取款 for customer, 收款 for merchant). All M1-era plan
-// placeholders have been removed.
+// 首页顶部使用带动画效果的选项卡组件，所有功能入口集中放置。
+// 初始状态（概览 tab）仅展示余额与身份，不展示任何提示文字；
+// 点击对应选项卡后，面板以淡入+上移动画平滑切换至目标功能界面。
+// 各功能界面内的交互提示统一改为 CollapsibleHint 折叠面板。
 //
-// Phase 1 (v5 §三 1.5 开户改革)：新用户 balance=0，需先到 /bank 充值才能
-// 取款。余额为 0 时主 CTA 指向"银行充值"而非"取款"，避免用户撞 INSUFFICIENT_BALANCE。
-// Phase 6.4：显示待重试支付徽章——从 IndexedDB pending_payments store 读取
-//   数量，>0 时在余额区下方显示告警卡片引导用户去 /payment 重试。
+// 动画遵循 hyperframes-keyframes 原则：有限时长、确定性延迟、
+// transform/opacity 合成层属性，避免触发布局重排。
 
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ArrowRightOutlined, SafetyOutlined, BankOutlined, ClockCircleOutlined } from '@ant-design/icons';
+import { useState, useEffect, useRef } from 'react';
+import {
+  BankOutlined, WalletOutlined, ExportOutlined, ImportOutlined,
+  HistoryOutlined, SafetyOutlined,
+} from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext.jsx';
 import { countPendingPayments } from '../utils/walletDB.js';
 
-const ROLE_META = {
-  customer: { label: '顾客', verb: '取款', route: '/withdraw', caption: '盲签名 · 4-move 切换校验' },
-  merchant: { label: '商户', verb: '收款', route: '/payment', caption: '本地预验签 · 双花检测' },
+import BankPage from './Bank.jsx';
+import WalletPage from './Wallet.jsx';
+import WithdrawPage from './Withdraw.jsx';
+import PaymentPage from './Payment.jsx';
+import HistoryPage from './History.jsx';
+import PrivacyPage from './Privacy.jsx';
+
+const TABS = [
+  { key: 'overview', label: '概览', icon: null },
+  { key: 'bank', label: '银行', icon: <BankOutlined /> },
+  { key: 'wallet', label: '钱包', icon: <WalletOutlined /> },
+  { key: 'withdraw', label: '取款', icon: <ExportOutlined /> },
+  { key: 'payment', label: '收款', icon: <ImportOutlined /> },
+  { key: 'history', label: '历史', icon: <HistoryOutlined /> },
+  { key: 'privacy', label: '隐私', icon: <SafetyOutlined /> },
+];
+
+const PANEL_MAP = {
+  bank: <BankPage />,
+  wallet: <WalletPage />,
+  withdraw: <WithdrawPage />,
+  payment: <PaymentPage />,
+  history: <HistoryPage />,
+  privacy: <PrivacyPage />,
 };
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const navigate = useNavigate();
+  const [active, setActive] = useState('overview');
   const [pendingCount, setPendingCount] = useState(0);
+  const tabRefs = useRef({});
 
-  // Phase 6.4: load pending payment count for badge
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const count = await countPendingPayments();
         if (!cancelled) setPendingCount(count);
-      } catch {
-        // IndexedDB not available — silently ignore
-      }
+      } catch { /* IndexedDB unavailable */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [active]);
 
-  const role = user?.role ?? 'customer';
-  const meta = ROLE_META[role] ?? ROLE_META.customer;
-  const balance = user?.balance ?? 0;
-  const needsFunding = balance === 0;
+  const activeIdx = TABS.findIndex((t) => t.key === active);
 
   return (
-    <div className="bc-page" style={{ paddingTop: 40, paddingBottom: 64 }}>
-      <p className="bc-eyebrow bc-rise-1" style={{ marginBottom: 18 }}>
-        BlindCash · 盲签名数字货币实验台
-      </p>
-
-      <h1 className="bc-mega bc-rise-1" style={{ marginBottom: 14 }}>
-        欢迎，<span style={{ color: 'var(--gold-400)' }}>{user?.username || '匿名'}</span>。
-      </h1>
-      <p className="bc-rise-2" style={{ color: 'var(--text-secondary)', fontSize: 17, maxWidth: 620, margin: '0 0 36px' }}>
-        本账户以 <span className="bc-mono" style={{ color: 'var(--paper-100)' }}>{meta.label}</span> 身份登记。
-        {role === 'customer'
-          ? '顾客可向银行发起盲签名取款，取得不可追踪的 token 后交付商户存款。'
-          : '商户可粘贴顾客交付的 token，本地预验签后向银行结算入账。'}
-      </p>
-
-      <hr className="bc-hairline bc-rise-2" style={{ marginBottom: 36 }} />
-
-      {/* ── Balance hero ── */}
-      <section className="bc-card bc-rise-3" style={{ padding: '32px 36px', marginBottom: 32 }}>
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
+    <div className="bc-page" style={{ paddingTop: 28, paddingBottom: 64 }}>
+      {/* ── 顶部余额条 + 选项卡 ── */}
+      <header className="bc-rise-1" style={{ marginBottom: 24 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'flex-end',
+            justifyContent: 'space-between',
+            gap: 24,
+            flexWrap: 'wrap',
+            marginBottom: 28,
+          }}
+        >
           <div>
-            <div className="bc-stat-label" style={{ marginBottom: 12 }}>账户余额</div>
-            <div className="bc-num" style={{ color: 'var(--gold-400)' }}>
-              {balance}
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 16, color: 'var(--text-muted)', marginLeft: 8, letterSpacing: '0.1em' }}>
+            <p className="bc-eyebrow" style={{ marginBottom: 10 }}>
+              BlindCash · 盲签名数字货币实验台
+            </p>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
+              <span className="bc-num" style={{ color: 'var(--gold-400)' }}>
+                {user?.balance ?? 0}
+              </span>
+              <span className="bc-mono" style={{ fontSize: 14, color: 'var(--text-muted)', letterSpacing: '0.1em' }}>
                 BC
               </span>
             </div>
-            <div className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, letterSpacing: '0.06em' }}>
-              {needsFunding ? 'NEW ACCOUNT · BALANCE 0 · PLEASE DEPOSIT' : 'READY FOR BLIND WITHDRAWAL'}
-            </div>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end' }}>
-            <span className={`bc-chip ${role === 'customer' ? 'bc-chip--gold' : 'bc-chip--emerald'}`}>
-              {meta.label}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span className={`bc-chip ${user?.role === 'merchant' ? 'bc-chip--emerald' : 'bc-chip--gold'}`}>
+              {user?.role === 'merchant' ? '商户' : '顾客'}
             </span>
             <span className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               @{user?.username}
             </span>
           </div>
         </div>
-      </section>
 
-      {/* ── Phase 6.4: 待重试支付告警 ── */}
-      {pendingCount > 0 && (
-        <section
-          className="bc-card bc-rise-3"
-          style={{
-            padding: '20px 28px',
-            marginBottom: 24,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 16,
-            flexWrap: 'wrap',
-            borderLeft: '3px solid #fa8c16',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <ClockCircleOutlined style={{ fontSize: 28, color: '#fa8c16' }} />
-            <div>
-              <div className="bc-display" style={{ fontSize: 18, marginBottom: 4 }}>
-                {pendingCount} 笔待重试支付
-              </div>
-              <div className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                网络故障时暂存的支付 · 点击前往收款页重试
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="bc-ghost-btn"
-            onClick={() => navigate('/payment')}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              fontSize: 13,
-              color: 'var(--gold-400)',
-            }}
-          >
-            前往重试
-            <ArrowRightOutlined />
-          </button>
-        </section>
-      )}
-
-      {/* ── Primary action card ── */}
-      {/* Phase 1 (v5 §三 1.5)：余额=0 时主 CTA 指向 /bank 充值，而非取款。 */}
-      <section className="bc-card bc-rise-4" style={{ padding: 0, overflow: 'hidden' }}>
-        <button
-          type="button"
-          onClick={() => navigate(needsFunding ? '/bank' : meta.route)}
-          aria-label={needsFunding ? '前往银行充值页' : `前往${meta.verb}页`}
-          style={{
-            appearance: 'none',
-            border: 0,
-            background: 'transparent',
-            color: 'inherit',
-            cursor: 'pointer',
-            width: '100%',
-            textAlign: 'left',
-            padding: '28px 36px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 24,
-            transition: 'background var(--dur-med) var(--ease-out)',
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(229, 179, 107, 0.04)')}
-          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-        >
-          <div>
-            <div className="bc-eyebrow" style={{ marginBottom: 8 }}>{needsFunding ? '待办' : '下一步'}</div>
-            <h2 style={{ fontSize: 28, margin: 0, display: 'inline-flex', alignItems: 'center', gap: 12 }}>
-              {needsFunding ? <><BankOutlined /> 充值</> : meta.verb}
-            </h2>
-            <div className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
-              {needsFunding ? '模拟法币入账 · 单次上限 1000 BC · 日累计 5000 BC' : meta.caption}
-            </div>
-          </div>
+        {/* ── 动画选项卡 ── */}
+        <div className="bc-tabbar" role="tablist" aria-label="功能导航">
+          {TABS.map((tab, idx) => {
+            const isActive = tab.key === active;
+            const showBadge = tab.key === 'payment' && pendingCount > 0;
+            return (
+              <button
+                key={tab.key}
+                ref={(el) => (tabRefs.current[tab.key] = el)}
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => setActive(tab.key)}
+                className={`bc-tab ${isActive ? 'bc-tab--active' : ''}`}
+              >
+                {tab.icon && <span className="bc-tab__icon">{tab.icon}</span>}
+                <span className="bc-tab__label">{tab.label}</span>
+                {showBadge && <span className="bc-tab__badge">{pendingCount}</span>}
+              </button>
+            );
+          })}
+          {/* 滑动指示器：transform 跟随激活项索引 */}
           <span
-            className="bc-mono"
+            className="bc-tabbar__indicator"
             style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 10,
-              fontSize: 13,
-              letterSpacing: '0.08em',
-              textTransform: 'uppercase',
-              color: 'var(--gold-400)',
-              transition: 'gap var(--dur-med) var(--ease-out)',
+              transform: `translateX(${activeIdx * 100}%)`,
+              width: `${100 / TABS.length}%`,
             }}
-          >
-            进入
-            <ArrowRightOutlined />
-          </span>
-        </button>
-      </section>
+            aria-hidden="true"
+          />
+        </div>
+      </header>
 
-      {/* ── Protocol primer ── */}
-      <section className="bc-rise-5" style={{ marginTop: 40, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 20 }}>
-        <PrimerCard
-          title="盲签名"
-          glyph="α·G"
-          body="银行在不知晓消息内容的前提下对其签名；顾客事后解盲即得不可追踪的有效签名。"
-        />
-        <PrimerCard
-          title="切换校验"
-          glyph="N=10"
-          body="顾客提交 N 个盲化候选，银行任选其一签名，要求顾客揭示其余 N-1 个的盲化因子以证未作弊。"
-        />
-        <PrimerCard
-          title="双花检测"
-          glyph="serial"
-          body="每个 token 携带唯一 serial；银行将已花费 serial 记入 spent_coins 表，重花即遭拒绝。"
-        />
-      </section>
-
-      <footer style={{ marginTop: 48, display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)' }}>
-        <SafetyOutlined style={{ color: 'var(--emerald-400)' }} />
-        <span className="bc-mono" style={{ fontSize: 11, letterSpacing: '0.08em' }}>
-          α/β 仅存于前端内存 · 不可追踪 · 公开可验签
-        </span>
-      </footer>
+      {/* ── 面板区域：key 变化触发重挂载 → 进场动画 ── */}
+      <div className="bc-panel-stage">
+        {active === 'overview' ? (
+          <OverviewPanel key="overview" />
+        ) : (
+          <div key={active} className="bc-panel-enter">
+            {PANEL_MAP[active]}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function PrimerCard({ title, glyph, body }) {
+// ── 概览面板：仅展示余额统计，无提示文字 ──
+function OverviewPanel() {
+  const { user } = useAuth();
+  const balance = user?.balance ?? 0;
+  const needsFunding = balance === 0;
+
   return (
-    <div className="bc-card" style={{ padding: 22 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 14 }}>
-        <h3 style={{ fontSize: 20, margin: 0 }}>{title}</h3>
-        <span className="bc-mono" style={{ fontSize: 12, color: 'var(--gold-400)', letterSpacing: '0.08em' }}>
-          {glyph}
-        </span>
+    <div className="bc-panel-enter" key="overview">
+      <section
+        className="bc-card"
+        style={{ padding: '36px 40px', marginBottom: 24, position: 'relative', overflow: 'hidden' }}
+      >
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            top: -40,
+            right: -40,
+            width: 220,
+            height: 220,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(229,179,107,0.16), transparent 70%)',
+            pointerEvents: 'none',
+          }}
+        />
+        <div style={{ position: 'relative' }}>
+          <div className="bc-stat-label" style={{ marginBottom: 12 }}>
+            {needsFunding ? '账户待激活' : '账户余额'}
+          </div>
+          <div className="bc-mega" style={{ color: 'var(--gold-400)', fontSize: 'clamp(56px, 9vw, 110px)' }}>
+            {balance}
+          </div>
+          <div className="bc-mono" style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 14, letterSpacing: '0.1em' }}>
+            {needsFunding ? 'BALANCE 0 · 前往「银行」充值' : 'READY · 选择上方功能开始'}
+          </div>
+        </div>
+      </section>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gap: 16,
+        }}
+      >
+        <StatTile label="身份" value={user?.role === 'merchant' ? '商户' : '顾客'} accent="var(--emerald-400)" />
+        <StatTile label="用户名" value={`@${user?.username ?? '—'}`} accent="var(--cyan-400)" />
+        <StatTile label="状态" value={needsFunding ? '待充值' : '就绪'} accent="var(--gold-400)" />
       </div>
-      <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: 13.5, lineHeight: 1.7 }}>
-        {body}
-      </p>
+    </div>
+  );
+}
+
+function StatTile({ label, value, accent }) {
+  return (
+    <div className="bc-card" style={{ padding: '22px 24px' }}>
+      <div className="bc-stat-label" style={{ marginBottom: 10 }}>{label}</div>
+      <div className="bc-display" style={{ fontSize: 22, color: accent }}>{value}</div>
     </div>
   );
 }

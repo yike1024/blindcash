@@ -243,9 +243,9 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
   });
 
   it('writes a redeem_split transaction row', async () => {
-    // denomination=10 is a valid DENOMINATIONS entry; amount=20 is independent
-    // of denomination (face value vs signing key). split_denom=5 → 4 coins.
-    const tok = await mintToken(20, 10);
+    // denomination=10 is a valid DENOMINATIONS entry; amount must equal
+    // denomination (amount === denomination invariant). split_denom=5 → 2 coins.
+    const tok = await mintToken(10, 10);
     await api('/api/bank/redeem-split', {
       method: 'POST', token: customerToken,
       body: { ...tok, split_denomination: 5 },
@@ -255,14 +255,14 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
       [customerId],
     );
     expect(tx).toBeDefined();
-    expect(tx.amount).toBe(20);
+    expect(tx.amount).toBe(10);
     expect(tx.counterparty).toBe('bank');
     expect(tx.note).toContain('split into');
-    expect(tx.note).toContain('4×5BC');
+    expect(tx.note).toContain('2×5BC');
   });
 
   it('writes an audit_log entry', async () => {
-    const tok = await mintToken(30, 10);
+    const tok = await mintToken(10, 10);
     await api('/api/bank/redeem-split', {
       method: 'POST', token: customerToken,
       body: { ...tok, split_denomination: 5 },
@@ -273,7 +273,7 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
     );
     expect(audit).toBeDefined();
     expect(audit.action).toBe('redeem_split');
-    expect(audit.amount).toBe(30);
+    expect(audit.amount).toBe(10);
   });
 });
 

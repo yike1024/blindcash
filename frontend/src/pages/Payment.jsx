@@ -34,6 +34,7 @@ import {
   addPendingPayment, listPendingPayments, deletePendingPayment,
   updatePendingPaymentAttempt,
 } from '../utils/walletDB.js';
+import CollapsibleHint from '../components/CollapsibleHint.jsx';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -91,7 +92,9 @@ export default function PaymentPage() {
   const [inputMode, setInputMode] = useState('paste'); // 'paste' | 'wallet'
   const [rawText, setRawText] = useState('');
   const [preview, setPreview] = useState({ phase: 'empty' });
-  const publicKeyRef = useRef(null);
+  // Map of key_id → public key bytes. Phase 6.1 多面额密钥：不同面额用不同
+  // 密钥对签名，预验签时必须按 token.key_id 选对应公钥，否则必然失败。
+  const publicKeyMapRef = useRef({});
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
   const [lastToken, setLastToken] = useState(null);
@@ -100,14 +103,21 @@ export default function PaymentPage() {
   const [pendingPays, setPendingPays] = useState([]);
   const [retryingId, setRetryingId] = useState(null);
 
-  // Load bank public key for local pre-verify
+  // Load bank public keys for local pre-verify.
+  // Phase 6.1 多面额密钥：fetch /bank/pubkeys (plural) 拿到所有面额的
+  // { key_id → public_key } 映射。预验签时按 token.key_id 选对应公钥，
+  // 否则非 denom=1 的 token 会因公钥不匹配而预验签失败。
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await api.get('/bank/pubkey');
+        const { data } = await api.get('/bank/pubkeys');
         if (cancelled) return;
-        publicKeyRef.current = hexToBytes(data.public_key);
+        const map = {};
+        for (const info of Object.values(data.denominations)) {
+          map[info.key_id] = hexToBytes(info.public_key);
+        }
+        publicKeyMapRef.current = map;
       } catch {
         if (!cancelled) {
           message.error('无法获取银行公钥，请刷新页面重试');
@@ -208,8 +218,18 @@ export default function PaymentPage() {
         setPreview({ phase: 'invalid', reason: fmt.reason });
         return;
       }
-      if (!publicKeyRef.current) {
+      // 按 token.key_id 选对应面额的公钥；缺 key_id 时取映射中第一个（前向兼容）
+      const keyMap = publicKeyMapRef.current;
+      const keyIds = Object.keys(keyMap);
+      if (keyIds.length === 0) {
         setPreview({ phase: 'invalid', reason: '银行公钥尚未加载，请稍候再试' });
+        return;
+      }
+      const pubKey = fmt.fields.key_id !== undefined
+        ? keyMap[fmt.fields.key_id]
+        : keyMap[keyIds[0]];
+      if (!pubKey) {
+        setPreview({ phase: 'invalid', reason: `未找到 key_id=${fmt.fields.key_id} 对应的银行公钥（可能密钥已轮换）` });
         return;
       }
       try {
@@ -220,7 +240,7 @@ export default function PaymentPage() {
           sPrime,
           hexToBytes(fmt.fields.serial),
           fmt.fields.amount,
-          publicKeyRef.current,
+          pubKey,
         );
         setPreview({
           phase: 'ok',
@@ -440,12 +460,9 @@ export default function PaymentPage() {
   const previewBadge = (() => {
     if (preview.phase === 'empty') {
       return (
-        <Alert
-          type="info"
-          showIcon
-          message="将 token JSON 粘贴到下方文本框"
-          description="token 来自顾客取款向导第 ④ 步：{ serial, amount, R_prime, s_prime, key_id }。本地会立即做预验签，通过后才能提交存款。"
-        />
+        <CollapsibleHint title="将 token JSON 粘贴到下方文本框" tone="info">
+          token 来自顾客取款向导第 ④ 步：{'{ serial, amount, R_prime, s_prime, key_id }'}。本地会立即做预验签，通过后才能提交存款。
+        </CollapsibleHint>
       );
     }
     if (preview.phase === 'parsing') {
@@ -484,13 +501,20 @@ export default function PaymentPage() {
     );
   })();
 
+  const isMerchant = user?.role === 'merchant';
+
   return (
     <div className="bc-page" style={{ paddingTop: 32, paddingBottom: 64 }}>
       <header className="bc-rise-1" style={{ marginBottom: 28 }}>
-        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>收款</p>
+        <p className="bc-eyebrow" style={{ marginBottom: 10 }}>{isMerchant ? '商户收款' : '存入 token'}</p>
         <h1 className="bc-display" style={{ fontSize: 'clamp(32px, 4vw, 44px)', margin: 0 }}>
-          粘贴 / 扫码 / 从钱包选 token
+          {isMerchant ? '接收顾客支付的 token' : '粘贴 / 扫码 / 从钱包选 token'}
         </h1>
+        {!isMerchant && (
+          <p style={{ marginTop: 8, color: 'var(--text-secondary)', fontSize: 14 }}>
+            顾客从「钱包」页出示 QR 码后，你在此粘贴或扫码存入。
+          </p>
+        )}
       </header>
 
       <section className="bc-card bc-rise-2" style={{ padding: '24px 28px', marginBottom: 24, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>
@@ -511,30 +535,67 @@ export default function PaymentPage() {
         </div>
       </section>
 
-      <Alert
-        className="bc-rise-2"
-        message="选择 token 输入方式"
-        description="粘贴 JSON、从钱包选择、或上传 QR 图片扫码。本地预验签通过后才能提交存款。"
-        type="info"
-        showIcon
-        style={{ marginBottom: 24 }}
-      />
+      {/* ── Chaum 盲签名付款流程图（参照课程 PPT §3.1 系统架构） ── */}
+      <section className="bc-card bc-rise-2" style={{ padding: 28, marginBottom: 24 }}>
+        <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>Chaum 盲签名付款流程</h2>
+        <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
+          D. Chaum 1982 · 离线电子现金
+        </p>
+        <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, flexWrap: 'wrap', marginBottom: 16 }}>
+          {[
+            { num: '❶', who: '顾客', act: '取款', detail: '银行盲签名\n4-move 切换校验', color: 'gold' },
+            { num: '❷', who: '→ 商户', act: '出示 token', detail: 'QR 码离线交付\n银行不参与', color: 'cyan' },
+            { num: '❸', who: '商户', act: '扫码/粘贴', detail: '本地预验签\ns\'·G ?= R\'+e\'·P', color: 'emerald' },
+            { num: '❹', who: '→ 银行', act: '验签', detail: 'Schnorr 盲签名\n真实性校验', color: 'gold' },
+            { num: '❺', who: '银行', act: '双花检测', detail: 'serial 查\nspent_coins 表', color: 'crimson' },
+            { num: '❻', who: '商户', act: '余额+', detail: '存款入账\nnew_balance', color: 'emerald' },
+          ].map((s, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', flex: '1 1 0', minWidth: 140 }}>
+              <div style={{
+                flex: 1, padding: '12px 10px', borderRadius: 'var(--r-sm)',
+                background: 'var(--ink-700)', border: '1px solid var(--border)',
+                textAlign: 'center',
+              }}>
+                <div style={{ fontSize: 18, marginBottom: 4 }}>{s.num}</div>
+                <div className="bc-mono" style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{s.who}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: `var(--${s.color}-400)`, marginBottom: 4 }}>{s.act}</div>
+                <div className="bc-mono" style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'pre-line', lineHeight: 1.4 }}>{s.detail}</div>
+              </div>
+              {i < 5 && <div style={{ color: 'var(--text-muted)', fontSize: 14, padding: '0 4px' }}>→</div>}
+            </div>
+          ))}
+        </div>
+        <Alert
+          type="info"
+          showIcon
+          message="银行不参与付款过程（离线支付）"
+          description={
+            <span style={{ fontSize: 13 }}>
+              顾客将 token 交给商户是<b>离线</b>的——银行不在中间。银行只在商户存款时验签（步骤❹）+ 查双花（步骤❺）。
+              盲签名保证银行<b>无法</b>将取款（步骤❶）与存款（步骤❹）关联——这是 Chaum 式匿名性的核心。
+            </span>
+          }
+        />
+      </section>
 
-      {/* ── 输入方式切换 ── */}
+      {/* ── 输入 token ── */}
       <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>
-        <Radio.Group
-          value={inputMode}
-          onChange={(e) => setInputMode(e.target.value)}
-          optionType="button"
-          buttonStyle="solid"
-          style={{ marginBottom: 18 }}
-        >
-          <Radio.Button value="paste"><CopyOutlined /> 粘贴 JSON</Radio.Button>
-          <Radio.Button value="wallet"><WalletOutlined /> 从钱包选</Radio.Button>
-        </Radio.Group>
+        {/* 顾客才有钱包选择模式；商户只有粘贴/扫码 */}
+        {!isMerchant && (
+          <Radio.Group
+            value={inputMode}
+            onChange={(e) => setInputMode(e.target.value)}
+            optionType="button"
+            buttonStyle="solid"
+            style={{ marginBottom: 18 }}
+          >
+            <Radio.Button value="paste"><CopyOutlined /> 粘贴 JSON</Radio.Button>
+            <Radio.Button value="wallet"><WalletOutlined /> 从钱包选</Radio.Button>
+          </Radio.Group>
+        )}
 
-        {/* 钱包选择模式 */}
-        {inputMode === 'wallet' && (
+        {/* 钱包选择模式（仅顾客） */}
+        {!isMerchant && inputMode === 'wallet' && (
           <div style={{ marginBottom: 16 }}>
             <Select
               style={{ width: '100%' }}
@@ -557,15 +618,14 @@ export default function PaymentPage() {
           </div>
         )}
 
-        {/* 粘贴/扫码 */}
         <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>
-          {inputMode === 'wallet' ? 'Token 内容' : '粘贴 Token JSON'}
+          {isMerchant ? '粘贴 / 扫码 收取 token' : (inputMode === 'wallet' ? 'Token 内容' : '粘贴 Token JSON')}
         </h2>
         <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
-          client verify-sig · 300ms debounce
+          client verify-sig · 300ms debounce · s'·G ?= R' + e'·P
         </p>
 
-        {inputMode === 'paste' && (
+        {(isMerchant || inputMode === 'paste') && (
           <div style={{ marginBottom: 14 }}>
             <Upload
               accept="image/*"
@@ -575,7 +635,7 @@ export default function PaymentPage() {
               <Button icon={<ScanOutlined />}>上传 QR 图片扫码</Button>
             </Upload>
             <Text type="secondary" style={{ fontSize: 12, marginLeft: 12 }}>
-              离线模式，无需摄像头/HTTPS
+              顾客从钱包页「出示」生成 QR 码 → 你在此扫码
             </Text>
           </div>
         )}
@@ -590,7 +650,7 @@ export default function PaymentPage() {
           onChange={(e) => setRawText(e.target.value)}
           autoSize={{ minRows: 6, maxRows: 12 }}
           placeholder={`{ "serial": "...", "amount": 30, "R_prime": "...", "s_prime": "...", "key_id": 1 }`}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 12, border: '1px solid var(--border-strong)' }}
         />
         <Space style={{ marginTop: 18 }}>
           <Button icon={<CopyOutlined />} onClick={copyToken} disabled={preview.phase !== 'ok'}>

@@ -25,6 +25,7 @@ import {
 
 import api from '../api/client.js';
 import { listCoins } from '../utils/walletDB.js';
+import CollapsibleHint from '../components/CollapsibleHint.jsx';
 
 const { Text } = Typography;
 
@@ -126,24 +127,17 @@ export default function PrivacyPage() {
         </button>
       </header>
 
-      {/* ── 说明 ── */}
-      <Alert
-        className="bc-rise-2"
-        message="匿名集是什么？"
-        description={
-          <span>
-            匿名集 = 银行视角下与你的 token 不可区分的 token 数量。数值越大，银行越难把你的取款和支付关联起来。
-            本系统按 <Text code className="bc-mono">(面额, 密钥版本)</Text> 分组统计已花费 token——同组里所有人都混在一起。
-            <br />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              注意：这是 <strong>下界</strong>。未花费的 token 在你浏览器里银行看不到，时间侧信道还能进一步缩小集合。
-            </Text>
-          </span>
-        }
-        type="info"
-        showIcon
-        style={{ marginBottom: 24 }}
-      />
+      {/* ── 说明（折叠） ── */}
+      <div className="bc-rise-2">
+        <CollapsibleHint title="匿名集是什么？" tone="cyan">
+          匿名集 = 银行视角下与你的 token 不可区分的 token 数量。数值越大，银行越难把你的取款和支付关联起来。
+          本系统按 <Text code className="bc-mono">(面额, 密钥版本)</Text> 分组统计已花费 token——同组里所有人都混在一起。
+          <br />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            注意：这是 <strong>下界</strong>。未花费的 token 在你浏览器里银行看不到，时间侧信道还能进一步缩小集合。
+          </Text>
+        </CollapsibleHint>
+      </div>
 
       {/* ── 汇总卡 ── */}
       {hasReport && !loading && (

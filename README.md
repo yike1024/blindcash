@@ -65,7 +65,7 @@ BlindCash 是一个面向密码货币与区块链技术课程的**教学演示�
 | 子功能 | 实现位置 | 接口 |
 |--------|----------|------|
 | 注册 / 登录 | [routes/auth.js](file:///d:/密码货币与区块链技术/blindcash/backend/src/routes/auth.js) | `POST /api/auth/register` / `login` |
-| 初始余额 100（教学） | [userService.js](file:///d:/密码货币与区块链技术/blindcash/backend/src/services/userService.js) | 注册时直接写入 balance=100 |
+| 初始余额 0（需自助充值） | [userService.js](file:///d:/密码货币与区块链技术/blindcash/backend/src/services/userService.js) | 注册时写入 balance=0，需 `POST /api/bank/deposit` 充值后才能取款 |
 | 取款 4-step 向导 | [Withdraw.jsx](file:///d:/密码货币与区块链技术/blindcash/frontend/src/pages/Withdraw.jsx) | init → submit → reveal+unblind → token 展示 |
 | α/β 内存隔离 | [Withdraw.jsx](file:///d:/密码货币与区块链技术/blindcash/frontend/src/pages/Withdraw.jsx#L1) | `useRef([])` + beforeunload + 即时清空 |
 | TTL 倒计时 | [Withdraw.jsx](file:///d:/密码货币与区块链技术/blindcash/frontend/src/pages/Withdraw.jsx) | `useState(() => Date.now())` + 1Hz setInterval，5 分钟过期 |
@@ -156,7 +156,7 @@ BC_DEMO_N=10 npm run dev
 
 启动后需通过 `/register` 自行注册账号。两类角色：
 
-- **customer**（付款人）：注册后自动获得初始余额 100
+- **customer**（付款人）：注册后余额 0，需通过 `/bank` 自助充值（模拟法币入账）后才能取款
 - **merchant**（收款人）：注册后余额 0，通过接收 token 兑付增加
 
 > 教学演示建议：alice/customer + bob/merchant + carol/merchant（用于双商户并发双花演示）
@@ -171,7 +171,7 @@ BC_DEMO_N=10 npm run dev
 | [docs/REQUIREMENTS.md](file:///d:/密码货币与区块链技术/blindcash/docs/REQUIREMENTS.md) | 用例图 + 15 FR + 10 NFR + 验收标准 | 评审 / 课题答辩 |
 | [docs/DESIGN.md](file:///d:/密码货币与区块链技术/blindcash/docs/DESIGN.md) | 架构图 + 4-move 时序图 + ER 图 + API 表 | 架构 review |
 | [docs/IMPLEMENTATION.md](file:///d:/密码货币与区块链技术/blindcash/docs/IMPLEMENTATION.md) | M1-M7 里程碑 + 9 项关键工程决策 | 实现 review |
-| [docs/TESTING.md](file:///d:/密码货币与区块链技术/blindcash/docs/TESTING.md) | 104 用例分类 + 盲性证据 + 双花演示 | 测试 review |
+| [docs/TESTING.md](file:///d:/密码货币与区块链技术/blindcash/docs/TESTING.md) | 225 用例分类 + 盲性证据 + 双花演示 | 测试 review |
 | [docs/USERGUIDE.md](file:///d:/密码货币与区块链技术/blindcash/docs/USERGUIDE.md) | 银行/付款人/收款人 三方操作手册 | 终端用户 |
 | [ISOLATION.md](file:///d:/密码货币与区块链技术/blindcash/ISOLATION.md) | 9 条不变量 + 落地证据 | 协议 review |
 
@@ -218,22 +218,24 @@ BC_DEMO_N=10 npm run dev
 ## 7. 测试
 
 ```bash
-# 全量测试（104 用例，约 65 秒，含概率测试）
+# 后端全量测试（207 用例，约 90 秒，含 1000-trial 概率测试）
 npm test
 
 # 详细输出（含盲性证据的熵值打印）
 BC_VERBOSE=1 npm test
 
-# 单独跑某个里程碑
+# 单独跑某个测试文件
 npx vitest run backend/tests/integration.test.js
 ```
 
-**预期输出**：
+**预期输出**（后端）：
 
 ```
- Test Files  8 passed (8)
-      Tests  104 passed (104)
+ Test Files  18 passed (18)
+      Tests  207 passed (207)
 ```
+
+> 前端另有 18 个单元测试（`cd frontend && npx vitest run`），全量合计 225 用例。
 
 **测试矩阵**：
 

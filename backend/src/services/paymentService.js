@@ -4,7 +4,8 @@
 //   1. token transmission: structured fields { serial, amount, R_prime, s_prime }
 //      (NOT a JSON blob) so field-level validation can 400 each malformed field
 //      individually before reaching the (ms-level) curve operations.
-//   2. initial balance: customer registers with balance=100 (see userService.js)
+//   2. initial balance: customer registers with balance=0 (Phase 1); tests
+//      fund via fundUser() → /api/bank/deposit (see userService.js)
 //   3. merchant pre-verification: M6 scope, NOT done here.
 //
 // Professor's M5 隐患 (all addressed):

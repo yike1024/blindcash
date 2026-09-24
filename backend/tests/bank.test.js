@@ -96,13 +96,14 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
 }
 
 /** Run full 4-move withdrawal as the customer; return the unblinded token. */
-async function mintToken(amount = 30) {
-  const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount } });
+async function mintToken(amount = 10) {
+  const denomination = amount;
+  const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount, denomination } });
   expect(init.status).toBe(201);
   const { session_id, R, N } = init.body;
-  const pub = await api('/api/bank/pubkey');
-  const publicKeyHex = pub.body.public_key;
-  const keyId = pub.body.key_id;
+  const pubRes = await api('/api/bank/pubkeys');
+  const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
+  const keyId = init.body.key_id;
   const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', {
@@ -353,35 +354,38 @@ describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
   });
 
   it('happy path: redeem own token (v2 with key_id) → 200, balance credited', async () => {
-    // Fund customer 100, withdraw 30 (→ balance 70), redeem own token (→ balance 100).
+    // Fund customer 100, withdraw 10 (→ balance 90), redeem own token (→ balance 100).
     fundUser(customerId, 100);
-    const { token } = await mintToken(30);
+    const { token } = await mintToken(10);
 
     // Sanity: token includes key_id (v2 schema).
-    expect(token.key_id).toBe(1);
+    // key_version is globally unique across denominations: GET /api/bank/pubkey
+    // test seeds denom=1 → key_version=1, so denom=10 gets key_version=2.
+    expect(token.key_id).toBe(2);
 
     const res = await api('/api/bank/redeem', {
       method: 'POST', token: customerToken, body: token,
     });
     expect(res.status).toBe(200);
-    expect(res.body.deposited).toBe(30);
-    // customer balance: 100 - 30 (withdraw) + 30 (redeem) = 100
+    expect(res.body.deposited).toBe(10);
+    // customer balance: 100 - 10 (withdraw) + 10 (redeem) = 100
     expect(res.body.new_balance).toBe(100);
 
-    // bank_reserve.total_redeemed should have been bumped by 30.
+    // bank_reserve.total_redeemed should have been bumped by 10.
     const r = queryOne(
       'SELECT total_issued, total_redeemed, reserve_balance FROM bank_reserve WHERE id = 1',
     );
-    expect(r.total_issued).toBe(30);
-    expect(r.total_redeemed).toBe(30);
+    expect(r.total_issued).toBe(10);
+    expect(r.total_redeemed).toBe(10);
     expect(r.reserve_balance).toBe(100);
   });
 
   it('redeem without key_id still works (legacy token fallback to active key)', async () => {
     // Phase 1 single key: key_id is optional in processPayment — falls back
-    // to getActivePublicKey(). This proves the route accepts old-style tokens.
+    // to getActivePublicKey() (denom=1). This proves the route accepts old-style
+    // tokens. Must use denom=1 so the fallback key matches the signing key.
     fundUser(customerId, 100);
-    const { token } = await mintToken(20);
+    const { token } = await mintToken(1);
     // Strip key_id — emulate a legacy token.
     const { key_id, ...legacyToken } = token;
     expect(key_id).toBe(1);
@@ -390,20 +394,20 @@ describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
       method: 'POST', token: customerToken, body: legacyToken,
     });
     expect(res.status).toBe(200);
-    expect(res.body.deposited).toBe(20);
-    expect(res.body.new_balance).toBe(100); // 100 - 20 + 20 = 100
+    expect(res.body.deposited).toBe(1);
+    expect(res.body.new_balance).toBe(100); // 100 - 1 + 1 = 100
   });
 
   it('double-redeem same token → 409 DOUBLE_SPEND', async () => {
     fundUser(customerId, 100);
-    const { token } = await mintToken(25);
+    const { token } = await mintToken(10);
 
     // First redeem succeeds.
     const r1 = await api('/api/bank/redeem', {
       method: 'POST', token: customerToken, body: token,
     });
     expect(r1.status).toBe(200);
-    expect(r1.body.deposited).toBe(25);
+    expect(r1.body.deposited).toBe(10);
 
     // Second redeem with the same serial → 409.
     const r2 = await api('/api/bank/redeem', {

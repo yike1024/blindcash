@@ -50,7 +50,7 @@
 │  ┌──────────────────────────────────────────────────────────┐    │
 │  │  服务层 (services/)                                       │    │
 │  │  authService     bcrypt(12) + JWT                         │    │
-│  │  userService     createUser (M5: balance=100 if customer)│    │
+│  │  userService     createUser (balance=0, Phase 1 自助充值)│    │
 │  │  bankKeyService  getOrGenerate (singleton keypair)        │    │
 │  │  withdrawalService  4-move state machine + 退款事务      │    │
 │  │  paymentService     formatGate + verifySig + atomic deposit│  │

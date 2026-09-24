@@ -1,17 +1,13 @@
 // components/AppLayout.jsx — vault header + content shell
 //
-// A thin horizontal header: brand seal + wordmark, hairline nav with
-// underline-on-active links, a role chip, the username, and a ghost logout
-// button. Page content renders via <Outlet /> inside a constrained column.
-//
-// Phase 6.4: "收款"导航项显示待重试支付数量徽章（来自 IndexedDB
-// pending_payments store）。徽章在全局导航可见，提醒用户有未完成的支付。
+// A thin horizontal header: brand seal + wordmark, a single "首页" nav link
+// (all function entries now live in the Dashboard's animated tabs),
+// a role chip, the username, and a ghost logout button.
+// Page content renders via <Outlet /> inside a constrained column.
 
-import { useState, useEffect } from 'react';
 import { Layout } from 'antd';
 import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { countPendingPayments } from '../utils/walletDB.js';
 
 const { Header, Content } = Layout;
 
@@ -24,22 +20,6 @@ export default function AppLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [pendingCount, setPendingCount] = useState(0);
-
-  // Phase 6.4: poll pending payments count for nav badge.
-  // Re-check on route change so badge updates after retry on /payment.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const count = await countPendingPayments();
-        if (!cancelled) setPendingCount(count);
-      } catch {
-        // IndexedDB not available — silently ignore
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [location.pathname]);
 
   const handleLogout = () => {
     logout();
@@ -48,15 +28,13 @@ export default function AppLayout() {
 
   const roleMeta = ROLE_META[user?.role] ?? { label: user?.role, chip: '' };
 
-  const navItems = [
-    { to: '/dashboard', label: '仪表盘' },
-    { to: '/bank', label: '银行' },
-    { to: '/wallet', label: '钱包' },
-    { to: '/withdraw', label: '取款' },
-    { to: '/payment', label: '收款', badgeKey: 'payment' },
-    { to: '/history', label: '历史' },
-    { to: '/privacy', label: '隐私' },
+  // 所有功能入口已集中到首页（Dashboard）的动画选项卡中，
+  // 头部导航仅保留「首页」入口，避免与选项卡重复。
+  const baseNav = [
+    { to: '/dashboard', label: '首页' },
   ];
+  const roleNav = [];
+  const navItems = [...baseNav, ...roleNav];
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -91,37 +69,13 @@ export default function AppLayout() {
         <nav style={{ display: 'flex', alignItems: 'center', gap: 28 }} aria-label="主导航">
           {navItems.map((item) => {
             const active = location.pathname === item.to;
-            const showBadge = item.badgeKey === 'payment' && pendingCount > 0;
             return (
               <Link
                 key={item.to}
                 to={item.to}
                 className={`bc-nav-link ${active ? 'bc-nav-link--active' : ''}`}
-                style={{ position: 'relative' }}
               >
                 {item.label}
-                {showBadge && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: -6,
-                      right: -10,
-                      backgroundColor: '#fa8c16',
-                      color: '#fff',
-                      fontSize: 10,
-                      fontWeight: 700,
-                      lineHeight: '16px',
-                      minWidth: 16,
-                      height: 16,
-                      borderRadius: 8,
-                      padding: '0 4px',
-                      textAlign: 'center',
-                      fontFamily: 'var(--font-mono)',
-                    }}
-                  >
-                    {pendingCount}
-                  </span>
-                )}
               </Link>
             );
           })}

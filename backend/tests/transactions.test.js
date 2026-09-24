@@ -91,12 +91,13 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
 }
 
 /** 跑完整 4-move 取款，返回 { token, session_id } */
-async function mintToken(token, amount = 30) {
-  const init = await api('/api/withdraw/init', { method: 'POST', token, body: { amount } });
+async function mintToken(token, amount = 10) {
+  const denomination = amount;
+  const init = await api('/api/withdraw/init', { method: 'POST', token, body: { amount, denomination } });
   expect(init.status).toBe(201);
   const { session_id, R, N } = init.body;
-  const pub = await api('/api/bank/pubkey');
-  const publicKeyHex = pub.body.public_key;
+  const pubRes = await api('/api/bank/pubkeys');
+  const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
   const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', {
@@ -130,6 +131,7 @@ async function mintToken(token, amount = 30) {
       amount,
       R_prime: candidates[j].R_prime,
       s_prime: scalarToHexFixed(sPrime),
+      key_id: init.body.key_id,
     },
   };
 }
@@ -184,7 +186,7 @@ afterAll(async () => {
 
 describe('M7: withdraw 写流水', () => {
   it('取款成功后 transactions 表有一条 withdraw 流水', async () => {
-    const { session_id } = await mintToken(customerToken, 30);
+    const { session_id } = await mintToken(customerToken, 10);
 
     const db = getDb();
     // Phase 1: filter to only 'withdraw' rows — fundUser(customerId, 100)
@@ -196,7 +198,7 @@ describe('M7: withdraw 写流水', () => {
     ).all(customerId);
     expect(rows.length).toBe(1);
     expect(rows[0].kind).toBe('withdraw');
-    expect(rows[0].amount).toBe(30);
+    expect(rows[0].amount).toBe(10);
     expect(rows[0].counterparty).toBe('bank');
     expect(rows[0].session_id).toBe(session_id);
     expect(rows[0].note).toBe('取款');
@@ -209,7 +211,7 @@ describe('M7: withdraw 写流水', () => {
 
 describe('M7: deposit 写流水', () => {
   it('收款成功后 transactions 表有一条 deposit 流水（serial 非空）', async () => {
-    const { token } = await mintToken(customerToken, 30);
+    const { token } = await mintToken(customerToken, 10);
     const res = await api('/api/payment', {
       method: 'POST', token: merchantToken,
       body: token,
@@ -225,7 +227,7 @@ describe('M7: deposit 写流水', () => {
        WHERE user_id = ? AND kind = 'deposit' AND counterparty IS NULL`,
     ).all(merchantId);
     expect(rows.length).toBe(1);
-    expect(rows[0].amount).toBe(30);
+    expect(rows[0].amount).toBe(10);
     expect(rows[0].counterparty).toBeNull(); // Chaum 匿名
     expect(rows[0].serial).not.toBeNull();   // serial 非空
     expect(rows[0].note).toBe('收款');
@@ -239,7 +241,7 @@ describe('M7: deposit 写流水', () => {
 describe('M7: refund 写流水', () => {
   it('取款取消后 transactions 表有一条 refund 流水', async () => {
     const init = await api('/api/withdraw/init', {
-      method: 'POST', token: customerToken, body: { amount: 30 },
+      method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
     });
     const cancel = await api('/api/withdraw/cancel', {
       method: 'POST', token: customerToken, body: { session_id: init.body.session_id },
@@ -255,7 +257,7 @@ describe('M7: refund 写流水', () => {
     ).all(customerId);
     expect(rows.length).toBe(1);
     expect(rows[0].kind).toBe('refund');
-    expect(rows[0].amount).toBe(30);
+    expect(rows[0].amount).toBe(10);
     expect(rows[0].counterparty).toBe('bank');
     expect(rows[0].session_id).toBe(init.body.session_id);
     expect(rows[0].note).toContain('退款');
@@ -269,7 +271,7 @@ describe('M7: refund 写流水', () => {
 describe('M7: GET /api/transactions', () => {
   it('返回当前用户的流水（倒序）', async () => {
     // 先取款（withdraw 流水）
-    await mintToken(customerToken, 20);
+    await mintToken(customerToken, 10);
     // 再存给自己（deposit 流水，角色已解锁）
     const { token } = await mintToken(customerToken, 10);
     await api('/api/payment', { method: 'POST', token: customerToken, body: token });
@@ -277,7 +279,7 @@ describe('M7: GET /api/transactions', () => {
     const res = await api('/api/transactions', { token: customerToken });
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.transactions)).toBe(true);
-    // customer 应该有：withdraw 20 + withdraw 10 + deposit 10 = 3 条
+    // customer 应该有：withdraw 10 + withdraw 10 + deposit 10 = 3 条
     // （第二次 mintToken 又产生一条 withdraw 10）
     expect(res.body.transactions.length).toBeGreaterThanOrEqual(3);
     // 倒序：最新在前
@@ -297,30 +299,30 @@ describe('M7: GET /api/transactions', () => {
 
 describe('M7: 角色解锁闭环', () => {
   it('customer 也能存 token（角色锁已解锁）', async () => {
-    // customer 取款 30 → 余额 100→70
-    const { token } = await mintToken(customerToken, 30);
-    // customer 存给自己 → 余额 70→100
+    // customer 取款 10 → 余额 100→90
+    const { token } = await mintToken(customerToken, 10);
+    // customer 存给自己 → 余额 90→100
     const res = await api('/api/payment', {
       method: 'POST', token: customerToken,
       body: token,
     });
     expect(res.status).toBe(200);
-    expect(res.body.deposited).toBe(30);
+    expect(res.body.deposited).toBe(10);
     expect(res.body.new_balance).toBe(100); // 回到 100
   });
 
   it('merchant 也能取款（角色锁已解锁）', async () => {
     // Phase 1: merchant not funded in beforeEach (would add 'deposit' row
     // interfering with deposit-stream assertions). Fund explicitly here so
-    // merchant has balance=100 to withdraw 30 → 70.
+    // merchant has balance=100 to withdraw 10 → 90.
     fundUser(merchantId, 100);
-    // merchant 取款 30 → 余额 100→70
-    const res = await mintToken(merchantToken, 30);
-    expect(res.token.amount).toBe(30);
+    // merchant 取款 10 → 余额 100→90
+    const res = await mintToken(merchantToken, 10);
+    expect(res.token.amount).toBe(10);
 
     const db = getDb();
     const m = db.prepare('SELECT balance FROM users WHERE id = ?').get(merchantId);
-    expect(m.balance).toBe(70);
+    expect(m.balance).toBe(90);
 
     // merchant 也有 withdraw 流水
     const rows = db.prepare(
@@ -331,34 +333,34 @@ describe('M7: 角色解锁闭环', () => {
 
   it('完整转账闭环：customer 取款 → merchant 收款 → merchant 取款 → customer 收款', async () => {
     // Phase 1: merchant not funded in beforeEach. Fund explicitly here so
-    // merchant starts at 100 — needed for step 3 (withdraw 40 after receiving
-    // 30 → 130→90) and for the assertions against new_balance below.
+    // merchant starts at 100 — needed for step 3 (withdraw 10 after receiving
+    // 10 → 110→100) and for the assertions against new_balance below.
     fundUser(merchantId, 100);
-    // 1. customer 取款 30（100→70）
-    const { token } = await mintToken(customerToken, 30);
-    // 2. merchant 收款 30（100→130）
+    // 1. customer 取款 10（100→90）
+    const { token } = await mintToken(customerToken, 10);
+    // 2. merchant 收款 10（100→110）
     const dep = await api('/api/payment', {
       method: 'POST', token: merchantToken, body: token,
     });
     expect(dep.status).toBe(200);
-    expect(dep.body.new_balance).toBe(130);
-    // 3. merchant 取款 40（130→90）
-    const { token: token2 } = await mintToken(merchantToken, 40);
-    // 4. customer 收款 40（70→110）
+    expect(dep.body.new_balance).toBe(110);
+    // 3. merchant 取款 10（110→100）
+    const { token: token2 } = await mintToken(merchantToken, 10);
+    // 4. customer 收款 10（90→100）
     const dep2 = await api('/api/payment', {
       method: 'POST', token: customerToken, body: token2,
     });
     expect(dep2.status).toBe(200);
-    expect(dep2.body.new_balance).toBe(110);
+    expect(dep2.body.new_balance).toBe(100);
 
     // 验证双方流水
     const custTx = await api('/api/transactions', { token: customerToken });
     const merchTx = await api('/api/transactions', { token: merchantToken });
-    // customer 有：withdraw 30 + deposit 40
+    // customer 有：withdraw 10 + deposit 10
     const custKinds = custTx.body.transactions.map((t) => t.kind);
     expect(custKinds).toContain('withdraw');
     expect(custKinds).toContain('deposit');
-    // merchant 有：deposit 30 + withdraw 40
+    // merchant 有：deposit 10 + withdraw 10
     const merchKinds = merchTx.body.transactions.map((t) => t.kind);
     expect(merchKinds).toContain('deposit');
     expect(merchKinds).toContain('withdraw');

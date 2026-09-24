@@ -1,0 +1,42 @@
+# render.yaml — Render Blueprint（一键部署后端）
+#
+# 用法：将本仓库推送到 GitHub，在 Render 控制台 New → Blueprint 选择本仓库，
+# Render 会自动按此文件创建 blindcash-backend 服务。
+#
+# 说明：
+#   - 仅部署后端（前端已部署在 Surge: https://blindcash-tabs.surge.sh）
+#   - 使用原生 Node 运行时（非 Docker），Render 自动编译 better-sqlite3 原生模块
+#   - SQLite 数据文件位于 backend/data/，免费层磁盘易失（每次部署重置），
+#     如需持久化请升级到付费实例并挂载 disk，或改用 PostgreSQL
+#   - 部署完成后，用 Render 分配的 https://xxx.onrender.com 作为后端地址，
+#     重新构建前端（VITE_API_BASE_URL=该地址/api）并部署到 Surge
+
+services:
+  - type: web
+    name: blindcash-backend
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: backend
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Render 原生运行时支持的 Node 版本；better-sqlite3 v11 兼容 18/20/22
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      # 允许已部署的前端域名调用后端。若前端域名变更，更新此值后重新部署。
+      - key: CORS_ORIGIN
+        value: https://blindcash-tabs.surge.sh
+      # 银行私钥加密主密钥（AES-256）。部署后请勿更换，否则已有 bank_keys 无法解密。
+      - key: BC_MASTER_KEY
+        value: 70f9f4f5cd719e38d388d43226d8181e1ab8234bc6d77838881d5ec0a5eaeed6
+      # JWT 签名密钥。更换会使所有已签发 token 失效。
+      - key: BC_JWT_SECRET
+        value: da3dd49301988d822775234e8e19796bda76f847bd46c11bce4bf9d9647ede3470ac45755db147ce1d55fa2f96f73ced
+      - key: BC_LOG_LEVEL
+        value: info

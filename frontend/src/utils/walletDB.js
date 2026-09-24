@@ -13,15 +13,20 @@
 // **serial 做 keyPath**：天然 PRIMARY KEY，重复存入同一 serial 会触发
 //   ConstraintError——防重复存入（同一 token 存两次没意义）。
 //
+// **账号隔离（bug fix）**：IndexedDB 数据库名按用户 ID 命名
+//   `blindcash-wallet-${userId}`，不同账号的钱包完全隔离。登录/登出时
+//   调 resetWalletDb() 释放旧连接，下次访问自动打开新用户对应的数据库。
+//   这修复了"顾客充值后商户登录看到相同余额"的隔离失效问题。
+//
 // Phase 6.4 (v6 §四 6.4)：新增 pending_payments store。网络故障时支付请求
 // 暂存于此，待网络恢复后用户可手动重试。与 coins store 隔离——pending
-// 的 token 仍在钱包里（未消费），重试成功后才从 coins 删除。
+// 的 token 仍在钱包里（未消费），重试成功后才从 coins store 删除。
 //
 // 依赖：idb（Jake Archibald 维护的 IndexedDB promise 封装，~1.2KB）。
 
 import { openDB } from 'idb';
 
-const DB_NAME = 'blindcash-wallet';
+const DB_PREFIX = 'blindcash-wallet';
 const DB_VERSION = 2;
 const STORE = 'coins';
 const PENDING_STORE = 'pending_payments';
@@ -35,12 +40,34 @@ const PENDING_STORE = 'pending_payments';
  *   token = { serial, amount, R_prime, s_prime, key_id } — 原样存副本
  */
 
-// Singleton DB promise — openDB is called once and reused.
+// Singleton DB promise — openDB is called once per user and reused.
+// On login/logout, resetWalletDb() clears this promise so the next access
+// opens the new user's database.
 let dbPromise = null;
+
+/**
+ * Read the current user's ID from sessionStorage to construct a per-user
+ * database name. Falls back to 'anon' if no session is active — this only
+ * happens before login, where no wallet operations should occur anyway.
+ */
+function getCurrentDbName() {
+  let userId = 'anon';
+  try {
+    const userJson = sessionStorage.getItem('bc_user');
+    if (userJson) {
+      const u = JSON.parse(userJson);
+      if (u && u.id !== undefined) userId = String(u.id);
+    }
+  } catch {
+    // sessionStorage not available (SSR) — fall back to anon
+  }
+  return `${DB_PREFIX}-${userId}`;
+}
 
 function getDb() {
   if (!dbPromise) {
-    dbPromise = openDB(DB_NAME, DB_VERSION, {
+    const dbName = getCurrentDbName();
+    dbPromise = openDB(dbName, DB_VERSION, {
       upgrade(db, oldVersion) {
         // v1: coins store
         if (oldVersion < 1) {
@@ -63,6 +90,14 @@ function getDb() {
     });
   }
   return dbPromise;
+}
+
+/**
+ * Reset the singleton DB promise. Call this on login/logout so that the
+ * next wallet operation opens the correct per-user database.
+ */
+export function resetWalletDb() {
+  dbPromise = null;
 }
 
 /**
@@ -258,3 +293,6 @@ export async function clearAllPending() {
 export function _resetDbForTest() {
   dbPromise = null;
 }
+
+// Re-export resetWalletDb as an alias for tests that use the newer name.
+export { resetWalletDb as _resetWalletDbForTest };

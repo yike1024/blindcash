@@ -48,7 +48,28 @@ const PORT = process.env.PORT || 4100;
 // globalLimiter 会把所有请求当成代理的 IP 限流，误伤/绕过并存。
 app.set('trust proxy', 1);
 
-app.use(cors({ origin: ['http://localhost:5174', 'http://127.0.0.1:5174'] }));
+// CORS: 允许本地开发 + 已部署的前端域名。
+// 生产环境可通过 CORS_ORIGIN 环境变量配置（逗号分隔，或设为 * 允许全部）。
+const CORS_ALLOWED = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const DEFAULT_ORIGINS = [
+  'http://localhost:5174',
+  'http://127.0.0.1:5174',
+  'https://blindcash-tabs.surge.sh',
+];
+const allowedOrigins = CORS_ALLOWED.length ? CORS_ALLOWED : DEFAULT_ORIGINS;
+app.use(cors({
+  origin(origin, cb) {
+    // 允许无 origin 的请求（curl/Postman）以及白名单内的来源
+    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      cb(null, true);
+    } else {
+      cb(null, false);
+    }
+  },
+}));
 app.use(express.json({ limit: '1mb' }));
 
 // Phase 4 (v5 §三 4)：pino-http 自动给每个请求生成 req.id（UUID v4），

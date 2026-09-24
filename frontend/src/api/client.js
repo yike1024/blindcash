@@ -1,6 +1,8 @@
 // api/client.js — M1: axios instance with JWT interceptor
 //
-// baseURL is '/api' so Vite dev proxy forwards to backend (localhost:4000).
+// baseURL defaults to '/api' (Vite dev proxy forwards to backend).
+// For deployed frontends, set VITE_API_BASE_URL to the backend's public URL
+// (e.g. a localtunnel / cloudflared tunnel, or a Render/Koyeb deployment).
 // Request interceptor auto-attaches the JWT from sessionStorage.
 // sessionStorage is per-tab → two tabs can hold two independent sessions
 // (required for the "customer + merchant in two tabs" demo).
@@ -9,7 +11,7 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   headers: { 'Content-Type': 'application/json' },
 });
 

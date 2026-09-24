@@ -38,7 +38,9 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:4100',
+        // Read PORT from backend/.env fallback — keep in sync with backend PORT.
+        // On this dev box Windows has silently reserved :::4100 so we use 4101.
+        target: `http://localhost:${process.env.PORT || 4101}`,
         changeOrigin: true,
       },
     },
