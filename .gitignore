@@ -12,5 +12,6 @@ backend/data/*.db-*
 
 # 本地工具
 cloudflared.exe
+k6/k6.exe
 *.tgz
 
