@@ -23,7 +23,7 @@
 //         - same merchant re-submitting → 409 (retry semantics)
 //
 // Core design 铁律 (professor M5):
-//   verifySig 在事务外 (只读曲线运算，无锁) → BEGIN IMMEDIATE 只包
+//   verifySig 在事务外 (只读曲线运算，无锁) → runImmediateTx 只包
 //   "SELECT serial → 409 → INSERT spent_coins + UPDATE merchant.balance"
 //   三个写动作 → 任何一步失败整体回滚，merchant.balance 与 spent_coins 永不分裂。
 //
@@ -77,7 +77,7 @@ const HEX_RE = /^[0-9a-fA-F]+$/;
  * @returns {{serialBytes:Uint8Array, RPrimeBytes:Uint8Array, sPrimeBytes:Uint8Array, sPrime:bigint}}
  * @throws {PaymentError} 400 MALFORMED_TOKEN on any failure
  */
-function formatGate(tok) {
+export function formatGate(tok) {
   const { serial, amount, R_prime, s_prime } = tok;
 
   // ── string-level checks (no curve math, no allocations) ──
@@ -135,7 +135,7 @@ function formatGate(tok) {
  * @param {Uint8Array} sPrimeBytes   32 bytes
  * @returns {Uint8Array} 32-byte SHA256 digest
  */
-function computeTokenHash(serialBytes, rPrimeBytes, sPrimeBytes) {
+export function computeTokenHash(serialBytes, rPrimeBytes, sPrimeBytes) {
   return new Uint8Array(
     createHash('sha256')
       .update(Buffer.concat([serialBytes, rPrimeBytes, sPrimeBytes]))
@@ -144,16 +144,47 @@ function computeTokenHash(serialBytes, rPrimeBytes, sPrimeBytes) {
 }
 
 /**
+ * 校验 Token 签名及公钥，返回 tokenHash 与对应公钥信息（供 paymentService 和 escrowService 复用）。
+ */
+export async function verifyTokenCrypto({ serialBytes, amount, RPrimeBytes, sPrimeBytes, key_id }) {
+  const sPrime = bytesToScalar(sPrimeBytes);
+  let publicKey;
+  let effectiveKeyVersion;
+  try {
+    publicKey = (key_id != null)
+      ? await getPublicKeyByVersion(key_id)
+      : await getActivePublicKey();
+    effectiveKeyVersion = (key_id != null)
+      ? key_id
+      : await getActiveKeyVersion();
+  } catch (e) {
+    if (e instanceof BankKeyError) {
+      throw new PaymentError(e.status, e.code, e.message);
+    }
+    throw e;
+  }
+
+  const ok = verifySig(RPrimeBytes, sPrime, serialBytes, amount, publicKey);
+  if (!ok) {
+    throw new PaymentError(400, 'SIGNATURE_INVALID',
+      'signature verification failed — token is forged or tampered');
+  }
+
+  const tokenHash = computeTokenHash(serialBytes, RPrimeBytes, sPrimeBytes);
+  return { tokenHash, publicKey, effectiveKeyVersion, sPrime };
+}
+
+/**
  * Process a payment: verify the token signature, then atomically deposit it
  * to the merchant's balance. Double-spend attempts (same serial OR same
- * token_hash) are rejected with 409 inside a BEGIN IMMEDIATE transaction.
+ * token_hash) are rejected with 409 inside a runImmediateTx transaction.
  *
  * Flow (v3 §四-4 + professor's M5 铁律):
  *   1. formatGate — reject malformed at string level (H1, DoS defense)
  *   2. verifySig — Schnorr blind signature verification (OUTSIDE tx,
  *        read-only curve math, no lock needed)
  *   3. token_hash = SHA256(serial ‖ R' ‖ s') — bytes concat (H2)
- *   4. BEGIN IMMEDIATE:
+ *   4. runImmediateTx:
  *        SELECT serial FROM spent_coins → exists → 409 DOUBLE_SPEND
  *        INSERT spent_coins (serial, amount, deposited_to, token_hash)
  *          (token_hash UNIQUE → 409 on collision even with different serial)
@@ -176,79 +207,37 @@ function computeTokenHash(serialBytes, rPrimeBytes, sPrimeBytes) {
  * @returns {{deposited:number, new_balance:number}}
  * @throws {PaymentError} 400 MALFORMED_TOKEN / 400 SIGNATURE_INVALID / 409 DOUBLE_SPEND
  */
-export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, key_id }) {
-  // 1. Format gate (H1): reject malformed before curve operations.
-  const { serialBytes, RPrimeBytes, sPrimeBytes, sPrime } = formatGate({
+export async function processPayment({ merchant_id, serial, amount, R_prime, s_prime, key_id }) {
+  const { serialBytes, RPrimeBytes, sPrimeBytes } = formatGate({
     serial,
     amount,
     R_prime,
     s_prime,
   });
 
-  // 2. Verify signature (OUTSIDE transaction — only read-only curve math).
-  //    Failure here means the token is either tampered (e.g., amount bumped
-  //    after signing) or unblinded wrong. Either way: 400 SIGNATURE_INVALID.
-  //
-  //    Note on oracle surface: HTTP status is uniformly 400 for both
-  //    MALFORMED_TOKEN and SIGNATURE_INVALID (an attacker can't distinguish
-  //    "format bad" from "signature bad" via the status code alone — both
-  //    look like 400). The error CODE is kept distinct solely for debug
-  //    readability (a legitimate merchant hitting a 400 wants to know which
-  //    check failed). This is not an oracle: the attacker already knows
-  //    whether they constructed a well-formed token.
-  //
-  //    Phase 3 (v5 §三 3.2 落地)：service 层用
-  //    `getPublicKeyByVersion(key_id)` 查对应版本公钥验签。key_id 缺省
-  //    （旧 token 或 redeem 路由未传）时 fallback 到 getActivePublicKey()。
-  //    BankKeyError (KEY_RETIRED / KEY_NOT_FOUND) → PaymentError 映射。
-  let publicKey;
-  try {
-    publicKey = (key_id != null)
-      ? getPublicKeyByVersion(key_id)
-      : getActivePublicKey();
-  } catch (e) {
-    if (e instanceof BankKeyError) {
-      throw new PaymentError(e.status, e.code, e.message);
-    }
-    throw e;
-  }
-  const ok = verifySig(RPrimeBytes, sPrime, serialBytes, amount, publicKey);
-  if (!ok) {
-    throw new PaymentError(400, 'SIGNATURE_INVALID',
-      'signature verification failed — token is forged or tampered');
-  }
+  const { tokenHash, effectiveKeyVersion } = await verifyTokenCrypto({
+    serialBytes,
+    amount,
+    RPrimeBytes,
+    sPrimeBytes,
+    key_id,
+  });
 
-  // 3. token_hash with bytes-level concat (H2).
-  const tokenHash = computeTokenHash(serialBytes, RPrimeBytes, sPrimeBytes);
-
-  // 4. Atomic deposit (BEGIN IMMEDIATE holds the write lock for the full block).
-  //    Any throw inside → transaction rolls back, no partial state.
-  //    Phase 3: runInvariantCheckedTx wraps with audit on invariant_violation.
-  return runInvariantCheckedTx((db) => {
-    // Primary double-spend guard: same serial already spent → 409.
-    const existing = db.prepare(
+  return runInvariantCheckedTx(async (db) => {
+    // 检查是否已被普通花费或已被托管锁定
+    const existing = await db.prepare(
       `SELECT 1 FROM spent_coins WHERE serial = ?`,
     ).get(Buffer.from(serialBytes));
     if (existing) {
       throw new PaymentError(409, 'DOUBLE_SPEND',
-        'this token has already been spent');
+        'this token has already been spent or locked in escrow');
     }
 
-    // Phase 3 (v5 §三 3.2)：spent_coins INSERT 带 key_version 列，记录
-    // 这枚 token 是用哪个 key_version 签发的。key_id 缺省时用当前 active
-    // key_version（前向兼容旧 token 路径）。
-    const keyVersion = (key_id != null) ? key_id : getActiveKeyVersion();
-    // Phase 6.1: 从 key_id 反查 denomination，记录到 spent_coins 用于
-    // 6.3 匿名集分析（按 denom + key_version 分组统计）。
-    // key_id 缺省时（旧 token 路径）denom=1。
-    const denomination = (key_id != null) ? getDenominationByVersion(key_id) : 1;
+    const keyVersion = (key_id != null) ? key_id : effectiveKeyVersion;
+    const denomination = (key_id != null) ? await getDenominationByVersion(key_id) : 1;
 
-    // Insert spent_coins row. idx_sc_token_hash UNIQUE is the belt-and-suspenders
-    // guard for the corner case where two different serials produce the same
-    // (R', s') tuple (shouldn't happen under correct protocol, but the UNIQUE
-    // index makes it a DB-level invariant — see schema.sql comment).
     try {
-      db.prepare(
+      await db.prepare(
         `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash, key_version, denomination)
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
@@ -260,22 +249,18 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
         denomination,
       );
     } catch (e) {
-      // UNIQUE violation on token_hash (different serial, same (R', s')).
-      if (e.message && e.message.includes('UNIQUE')) {
+      if (e.code === '23505' || (e.message && e.message.includes('UNIQUE'))) {
         throw new PaymentError(409, 'DOUBLE_SPEND',
           "token_hash collision — same (R', s') already spent under a different serial");
       }
-      throw e; // re-throw anything else → route maps to 500
+      throw e;
     }
 
-    // Credit merchant balance. ISOLATION §一-2: only /payment mutates merchant.balance.
-    db.prepare(
+    await db.prepare(
       `UPDATE users SET balance = balance + ? WHERE id = ?`,
     ).run(amount, merchant_id);
 
-    // M7: 写一笔 deposit 流水，让商户在 /history 看到收款去向。
-    // counterparty = NULL（Chaum 盲现：token 匿名，商户无法知道付款人）。
-    recordTransaction(db, {
+    await recordTransaction(db, {
       user_id: merchant_id,
       kind: 'deposit',
       amount,
@@ -285,18 +270,14 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
       note: '收款',
     });
 
-    // Phase 1 (v5 §三 1.3)：total_redeemed += amount，与商户收款在同一
-    // BEGIN IMMEDIATE 内。语义上 total_redeemed = "所有 token 兑付总量"
-    // （包括商户收款和用户退币——电子货币一旦兑付就退出流通）。
-    db.prepare(
+    await db.prepare(
       `UPDATE bank_reserve
           SET total_redeemed = total_redeemed + ?,
               updated_at = CURRENT_TIMESTAMP
         WHERE id = 1`
     ).run(amount);
 
-    // Phase 3 (N1 落地)：payment 审计日志写在事务内
-    logAction({
+    await logAction({
       actor_id: merchant_id,
       action: 'payment',
       amount,
@@ -305,15 +286,12 @@ export function processPayment({ merchant_id, serial, amount, R_prime, s_prime, 
       db,
     });
 
-    // assertInvariant 在事务内调用——失败时整个 BEGIN IMMEDIATE 回滚，
-    // 不会出现 spent_coins 插了但 total_redeemed 没加的半状态。
-    assertInvariant(db);
+    await assertInvariant(db);
 
-    const row = db.prepare(
+    const row = await db.prepare(
       `SELECT balance FROM users WHERE id = ?`,
     ).get(merchant_id);
     if (!row) {
-      // Defensive: merchant row vanished mid-tx (shouldn't happen — FK enforced).
       throw new PaymentError(500, 'MERCHANT_NOT_FOUND', 'merchant account vanished mid-transaction');
     }
 
@@ -383,14 +361,12 @@ export const REDEEM_SPLIT_LIMITATIONS = [
  * @throws {PaymentError} 400 MALFORMED_TOKEN / 400 SIGNATURE_INVALID / 400 INVALID_SPLIT_DENOMINATION /
  *         400 SPLIT_NOT_DIVISIBLE / 409 DOUBLE_SPEND
  */
-export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id, split_denomination }) {
-  // 1. Validate split_denomination ∈ DENOMINATIONS
+export async function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id, split_denomination }) {
   if (!Number.isInteger(split_denomination) || !DENOMINATIONS.includes(split_denomination)) {
     throw new PaymentError(400, 'INVALID_SPLIT_DENOMINATION',
       `split_denomination must be one of ${DENOMINATIONS.join(', ')}`);
   }
 
-  // 2. Format gate (H1: reject malformed before curve operations)
   const { serialBytes, RPrimeBytes, sPrimeBytes, sPrime } = formatGate({
     serial,
     amount,
@@ -398,12 +374,11 @@ export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id,
     s_prime,
   });
 
-  // 3. Verify signature (OUTSIDE transaction — read-only curve math)
   let publicKey;
   try {
     publicKey = (key_id != null)
-      ? getPublicKeyByVersion(key_id)
-      : getActivePublicKey();
+      ? await getPublicKeyByVersion(key_id)
+      : await getActivePublicKey();
   } catch (e) {
     if (e instanceof BankKeyError) {
       throw new PaymentError(e.status, e.code, e.message);
@@ -416,22 +391,16 @@ export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id,
       'signature verification failed — token is forged or tampered');
   }
 
-  // 4. Split divisibility check (teaching: amount must be a multiple of
-  //    split_denomination so the conceptual "split into N small coins" is
-  //    well-formed; otherwise the requested split is meaningless).
   if (amount % split_denomination !== 0) {
     throw new PaymentError(400, 'SPLIT_NOT_DIVISIBLE',
       `amount (${amount}) must be divisible by split_denomination (${split_denomination})`);
   }
   const splitCount = amount / split_denomination;
 
-  // 5. token_hash (H2: bytes-level concat to prevent casing ambiguity)
   const tokenHash = computeTokenHash(serialBytes, RPrimeBytes, sPrimeBytes);
 
-  // 6. Atomic deposit (BEGIN IMMEDIATE holds the write lock).
-  return runInvariantCheckedTx((db) => {
-    // Primary double-spend guard
-    const existing = db.prepare(
+  return runInvariantCheckedTx(async (db) => {
+    const existing = await db.prepare(
       `SELECT 1 FROM spent_coins WHERE serial = ?`,
     ).get(Buffer.from(serialBytes));
     if (existing) {
@@ -439,14 +408,10 @@ export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id,
         'this token has already been spent');
     }
 
-    // Phase 6.2 教学化：INSERT spent_coins 时 denomination 列用
-    // split_denomination 而非原 key_id 反查的 denom——直观展示"这笔兑付
-    // 等价于 split_count 枚小币"。key_version 仍按原 token 的 key_id 记录
-    // （用于 6.3 匿名集分析按 (denom, key_version) 分组统计）。
-    const keyVersion = (key_id != null) ? key_id : getActiveKeyVersion();
+    const keyVersion = (key_id != null) ? key_id : await getActiveKeyVersion();
 
     try {
-      db.prepare(
+      await db.prepare(
         `INSERT INTO spent_coins (serial, amount, deposited_to, token_hash, key_version, denomination)
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
@@ -455,24 +420,21 @@ export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id,
         user_id,
         Buffer.from(tokenHash),
         keyVersion,
-        split_denomination,  // ← 教学化：用 split_denomination 而非原 denom
+        split_denomination,
       );
     } catch (e) {
-      if (e.message && e.message.includes('UNIQUE')) {
+      if (e.code === '23505' || (e.message && e.message.includes('UNIQUE'))) {
         throw new PaymentError(409, 'DOUBLE_SPEND',
           "token_hash collision — same (R', s') already spent under a different serial");
       }
       throw e;
     }
 
-    // Credit user balance (全额退到账户)
-    db.prepare(
+    await db.prepare(
       `UPDATE users SET balance = balance + ? WHERE id = ?`,
     ).run(amount, user_id);
 
-    // Record transaction flow (kind='redeem_split' so /history distinguishes
-    // this from normal 'deposit' / 'refund' / 'withdraw')
-    recordTransaction(db, {
+    await recordTransaction(db, {
       user_id,
       kind: 'redeem_split',
       amount,
@@ -482,17 +444,14 @@ export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id,
       note: `split into ${splitCount}×${split_denomination}BC`,
     });
 
-    // bank_reserve.total_redeemed += amount（与 /redeem 一致：token 兑付
-    // 后退出流通，total_redeemed 记录所有兑付总量）
-    db.prepare(
+    await db.prepare(
       `UPDATE bank_reserve
           SET total_redeemed = total_redeemed + ?,
               updated_at = CURRENT_TIMESTAMP
         WHERE id = 1`
     ).run(amount);
 
-    // Audit log inside tx
-    logAction({
+    await logAction({
       actor_id: user_id,
       action: 'redeem_split',
       amount,
@@ -501,10 +460,9 @@ export function redeemSplit({ user_id, serial, amount, R_prime, s_prime, key_id,
       db,
     });
 
-    // assertInvariant 在事务内——失败整体回滚
-    assertInvariant(db);
+    await assertInvariant(db);
 
-    const row = db.prepare(
+    const row = await db.prepare(
       `SELECT balance FROM users WHERE id = ?`,
     ).get(user_id);
     if (!row) {

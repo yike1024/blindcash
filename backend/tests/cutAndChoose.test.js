@@ -31,7 +31,7 @@ import { TOKEN_DOMAIN_TAG } from '../src/config/bank.js';
 import { bytesToHex, randomBytes } from './setup.js';
 
 // ── shared: build a single well-formed revealed candidate ──
-function makeOneRevealedCandidate(amount = 100) {
+async function makeOneRevealedCandidate (amount = 100) {
   const kp = generateKeyPair();
   const k = BigInt('0x' + bytesToHex(randomBytes(32))) % (n - 1n) + 1n;
   const { RBytes } = bankStep1(k);
@@ -48,7 +48,7 @@ function makeOneRevealedCandidate(amount = 100) {
 }
 
 // ── shared: build N candidates, pick j, build revealed array (all i ≠ j) ──
-function makeNCandidateSession(N, amount = 100) {
+async function makeNCandidateSession (N, amount = 100) {
   const kp = generateKeyPair();
   const candidates = [];
   for (let i = 0; i < N; i++) {
@@ -65,40 +65,40 @@ function makeNCandidateSession(N, amount = 100) {
 }
 
 describe('M2 · cutAndChoose.js — verifyRevealed single-candidate checks', () => {
-  it('accepts a well-formed revealed candidate (i ≠ j)', () => {
-    const c = makeOneRevealedCandidate();
+  it('accepts a well-formed revealed candidate (i ≠ j)', async () => {
+    const c = await makeOneRevealedCandidate();
     expect(verifyRevealed({
       R: c.R, RPrime: c.RPrime, serial: c.serial, amount: c.amount,
       publicKey: c.kp.publicKey, alpha: c.alpha, beta: c.beta, e: c.e,
     })).toBe(true);
   });
 
-  it('rejects tampered α (one bit flip)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered α (one bit flip)', async () => {
+    const c = await makeOneRevealedCandidate();
     expect(verifyRevealed({
       R: c.R, RPrime: c.RPrime, serial: c.serial, amount: c.amount,
       publicKey: c.kp.publicKey, alpha: c.alpha ^ 1n, beta: c.beta, e: c.e,
     })).toBe(false);
   });
 
-  it('rejects tampered β (one bit flip)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered β (one bit flip)', async () => {
+    const c = await makeOneRevealedCandidate();
     expect(verifyRevealed({
       R: c.R, RPrime: c.RPrime, serial: c.serial, amount: c.amount,
       publicKey: c.kp.publicKey, alpha: c.alpha, beta: c.beta ^ 1n, e: c.e,
     })).toBe(false);
   });
 
-  it('rejects tampered e (off-by-one)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered e (off-by-one)', async () => {
+    const c = await makeOneRevealedCandidate();
     expect(verifyRevealed({
       R: c.R, RPrime: c.RPrime, serial: c.serial, amount: c.amount,
       publicKey: c.kp.publicKey, alpha: c.alpha, beta: c.beta, e: c.e + 1n,
     })).toBe(false);
   });
 
-  it('rejects tampered R (one byte flipped)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered R (one byte flipped)', async () => {
+    const c = await makeOneRevealedCandidate();
     const badR = new Uint8Array(c.R);
     badR[5] ^= 0x01;
     expect(verifyRevealed({
@@ -107,8 +107,8 @@ describe('M2 · cutAndChoose.js — verifyRevealed single-candidate checks', () 
     })).toBe(false);
   });
 
-  it('rejects tampered R\' (one byte flipped in non-prefix position)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered R\' (one byte flipped in non-prefix position)', async () => {
+    const c = await makeOneRevealedCandidate();
     const badRp = new Uint8Array(c.RPrime);
     badRp[10] ^= 0x01;
     expect(verifyRevealed({
@@ -117,8 +117,8 @@ describe('M2 · cutAndChoose.js — verifyRevealed single-candidate checks', () 
     })).toBe(false);
   });
 
-  it('rejects tampered serial (one byte flipped)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered serial (one byte flipped)', async () => {
+    const c = await makeOneRevealedCandidate();
     const badSerial = new Uint8Array(c.serial);
     badSerial[10] ^= 0x01;
     expect(verifyRevealed({
@@ -127,8 +127,8 @@ describe('M2 · cutAndChoose.js — verifyRevealed single-candidate checks', () 
     })).toBe(false);
   });
 
-  it('rejects tampered amount (off-by-one)', () => {
-    const c = makeOneRevealedCandidate();
+  it('rejects tampered amount (off-by-one)', async () => {
+    const c = await makeOneRevealedCandidate();
     expect(verifyRevealed({
       R: c.R, RPrime: c.RPrime, serial: c.serial, amount: c.amount + 1,
       publicKey: c.kp.publicKey, alpha: c.alpha, beta: c.beta, e: c.e,
@@ -137,9 +137,9 @@ describe('M2 · cutAndChoose.js — verifyRevealed single-candidate checks', () 
 });
 
 describe('M2 · cutAndChoose.js — verifyAllRevealed', () => {
-  it('returns -1 when all N-1 revealed candidates pass (N=10)', () => {
+  it('returns -1 when all N-1 revealed candidates pass (N=10)', async () => {
     const N = 10;
-    const { kp, candidates, amount } = makeNCandidateSession(N);
+    const { kp, candidates, amount } = await makeNCandidateSession(N);
     const j = pickRandomJ(N);
     const revealed = candidates.filter(c => c.i !== j).map(c => ({
       i: c.i, R: c.R, RPrime: c.RPrime, serial: c.serial,
@@ -148,9 +148,9 @@ describe('M2 · cutAndChoose.js — verifyAllRevealed', () => {
     expect(verifyAllRevealed(revealed, amount, kp.publicKey)).toBe(-1);
   });
 
-  it('returns the index of the first failure when one candidate is bad', () => {
+  it('returns the index of the first failure when one candidate is bad', async () => {
     const N = 10;
-    const { kp, candidates, amount } = makeNCandidateSession(N);
+    const { kp, candidates, amount } = await makeNCandidateSession(N);
     const j = pickRandomJ(N);
     const revealed = candidates.filter(c => c.i !== j).map(c => ({
       i: c.i, R: c.R, RPrime: c.RPrime, serial: c.serial,
@@ -161,9 +161,9 @@ describe('M2 · cutAndChoose.js — verifyAllRevealed', () => {
     expect(verifyAllRevealed(revealed, amount, kp.publicKey)).toBe(3);
   });
 
-  it('returns 0 when the very first revealed candidate is bad', () => {
+  it('returns 0 when the very first revealed candidate is bad', async () => {
     const N = 5;
-    const { kp, candidates, amount } = makeNCandidateSession(N);
+    const { kp, candidates, amount } = await makeNCandidateSession(N);
     const j = 2;  // pick j deterministically
     const revealed = candidates.filter(c => c.i !== j).map(c => ({
       i: c.i, R: c.R, RPrime: c.RPrime, serial: c.serial,
@@ -175,7 +175,7 @@ describe('M2 · cutAndChoose.js — verifyAllRevealed', () => {
 });
 
 describe('M2 · cutAndChoose.js — pickRandomJ distribution', () => {
-  it('returns j ∈ [0, N-1]', () => {
+  it('returns j ∈ [0, N-1]', async () => {
     for (let trial = 0; trial < 100; trial++) {
       const j = pickRandomJ(10);
       expect(j).toBeGreaterThanOrEqual(0);
@@ -183,7 +183,7 @@ describe('M2 · cutAndChoose.js — pickRandomJ distribution', () => {
     }
   });
 
-  it('covers the full range [0, N-1] over many trials (no degenerate distribution)', () => {
+  it('covers the full range [0, N-1] over many trials (no degenerate distribution)', async () => {
     const N = 10;
     const counts = new Array(N).fill(0);
     for (let trial = 0; trial < 1000; trial++) {
@@ -201,11 +201,11 @@ describe('M2 · cutAndChoose.js — pickRandomJ distribution', () => {
 });
 
 describe('M2 · cut-and-choose cheat scenario (N=10)', () => {
-  it('user tampers amount in candidate i ≠ j → bank detects at reveal (abort)', () => {
+  it('user tampers amount in candidate i ≠ j → bank detects at reveal (abort)', async () => {
     const N = 10;
     const realAmount = 100;
     const fakeAmount = 1000;
-    const { kp, candidates } = makeNCandidateSession(N, realAmount);
+    const { kp, candidates } = await makeNCandidateSession(N, realAmount);
     const j = pickRandomJ(N);
 
     // Pick a target cheat index ≠ j and re-issue that candidate with the
@@ -228,7 +228,7 @@ describe('M2 · cut-and-choose cheat scenario (N=10)', () => {
     expect(okReal).toBe(false);  // bank detects mismatch → abort
   });
 
-  it('if the user only tampers amount in candidate j (the one bank signs), reveal cannot detect (residual 1/N cheat)', () => {
+  it('if the user only tampers amount in candidate j (the one bank signs), reveal cannot detect (residual 1/N cheat)', async () => {
     // This is the residual cheat window: cut-and-choose reduces cheat prob
     // to 1/N but does NOT eliminate it. If user guesses j correctly AND
     // only tampers that one candidate, all N-1 revealed candidates are
@@ -236,7 +236,7 @@ describe('M2 · cut-and-choose cheat scenario (N=10)', () => {
     const N = 10;
     const realAmount = 100;
     const fakeAmount = 1000;
-    const { kp, candidates } = makeNCandidateSession(N, realAmount);
+    const { kp, candidates } = await makeNCandidateSession(N, realAmount);
     const j = pickRandomJ(N);
 
     // Suppose the attacker GUESSED j_correctly = j_attack (here we cheat by
@@ -270,13 +270,13 @@ describe('M2 · cut-and-choose cheat scenario (N=10)', () => {
     // is ≈ 1/N (within a generous confidence band).
   });
 
-  it('over 1000 trials with N=10, cheat-success rate ≤ 1/N + slack (empirical bound)', { timeout: 180000 }, () => {
+  it('over 1000 trials with N=10, cheat-success rate ≤ 1/N + slack (empirical bound)', { timeout: 180000 }, async () => {
     const N = 10;
     const realAmount = 100;
     const fakeAmount = 1000;
     let successCount = 0;
     for (let trial = 0; trial < 1000; trial++) {
-      const { kp, candidates } = makeNCandidateSession(N, realAmount);
+      const { kp, candidates } = await makeNCandidateSession(N, realAmount);
       const jBank = pickRandomJ(N);
       // Attacker's guess is uniformly random — pick a fixed guessIdx in [0, N-1]
       // (the attacker doesn't know jBank ahead of time).
@@ -330,7 +330,7 @@ describe('M2 · BLINDNESS EVIDENCE (ISOLATION §3.3 — blindness invariant 3)',
   // threshold of 200 bits leaves generous headroom while still rejecting the
   // null hypothesis "R'_j is constant or low-entropy".
 
-  it('R\'_j byte sequence over 1000 trials has Shannon entropy ≥ 200 bits', () => {
+  it('R\'_j byte sequence over 1000 trials has Shannon entropy ≥ 200 bits', async () => {
     const TRIALS = 1000;
     const rPrimeJBytes = new Uint8Array(TRIALS * 33);
     // Light-weight single-candidate factory — the blindness-evidence claim
@@ -391,7 +391,7 @@ describe('M2 · BLINDNESS EVIDENCE (ISOLATION §3.3 — blindness invariant 3)',
     }
   });
 
-  it('bank cannot link (R\'_j, s\'_j) from session A to (R, e, s) of session A', () => {
+  it('bank cannot link (R\'_j, s\'_j) from session A to (R, e, s) of session A', async () => {
     // The linkability attack: given a final token (serial, amount, R', s')
     // and the bank's session transcript (R_i, e_i, s_i for each candidate,
     // including j), can the bank determine which candidate in the session
@@ -414,7 +414,7 @@ describe('M2 · BLINDNESS EVIDENCE (ISOLATION §3.3 — blindness invariant 3)',
     // since R'_j ≠ R_i for any i ≠ j (because α_j·G + β_j·P ≠ 0).
 
     const N = 5;
-    const { kp, candidates } = makeNCandidateSession(N, 100);
+    const { kp, candidates } = await makeNCandidateSession(N, 100);
     const j = pickRandomJ(N);
     const c = candidates[j];
 

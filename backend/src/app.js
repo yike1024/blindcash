@@ -97,7 +97,8 @@ app.use(globalLimiter);
  * Initialize DB schema via migrations + ensure the bank signing keypair exists.
  * Called ONLY when the server actually starts (app.listen), NOT at module
  * import time — so test files that import app for supertest don't initialize
- * the production DB before BC_DB_PATH is set.
+ * the DB before DATABASE_URL is set (tests manage their own schema via
+ * resetTestDb in beforeAll).
  *
  * Phase 0 (v5 §二 H1): now calls runMigrations() directly instead of the
  * legacy initSchema() — same effect, more explicit. On failure, throws and
@@ -114,17 +115,14 @@ app.use(globalLimiter);
  * is registered on SIGINT/SIGTERM so the interval is cleared on graceful
  * shutdown.
  */
-export function initDatabase() {
-  closeDb();  // reset singleton against current BC_DB_PATH (in case it changed)
+export async function initDatabase() {
+  await closeDb();
   const db = getDb();
-  runMigrations(db);
-  const kp = getOrGenerate();
+  await runMigrations(db);
+  const kp = await getOrGenerate();
   logger.info({ event: 'bank_key_loaded', public_key: bytesToHex(kp.publicKey) },
     'Bank signing keypair loaded');
 
-  // Phase 1 缺陷修复 (方案 A): start background cleanup job AFTER migrations
-  // (so withdrawal_sessions + bank_reserve tables exist). unref'd so it
-  // doesn't block process exit.
   const stopCleanup = startCleanupJob();
   process.on('SIGINT', stopCleanup);
   process.on('SIGTERM', stopCleanup);
@@ -154,7 +152,7 @@ app.use('/api/bank', bankRoutes);
 app.use('/api/withdraw', txLimiter, withdrawalRoutes);
 
 // Payment routes (M5/M7): POST /api/payment deposits a withdrawn token to any
-// logged-in user's balance. Format gate + verifySig + atomic BEGIN IMMEDIATE
+// logged-in user's balance. Format gate + verifySig + atomic runImmediateTx
 // live in paymentService.js.
 app.use('/api/payment', txLimiter, paymentRoutes);
 
@@ -240,11 +238,17 @@ app.use((err, req, res, _next) => {
 // Only start the HTTP server when running as the main entry (not when
 // imported by test files — supertest creates its own server from app).
 if (process.env.NODE_ENV !== 'test') {
-  initDatabase();
-  app.listen(PORT, () => {
-    logger.info({ event: 'server_listening', port: PORT },
-      `BlindCash API listening on http://localhost:${PORT}`);
-  });
+  initDatabase()
+    .then(() => {
+      app.listen(PORT, () => {
+        logger.info({ event: 'server_listening', port: PORT },
+          `BlindCash API listening on http://localhost:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      logger.error({ event: 'init_failed', error: err.message, stack: err.stack });
+      process.exit(1);
+    });
 }
 
 export default app;

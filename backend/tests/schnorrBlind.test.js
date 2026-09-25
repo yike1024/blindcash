@@ -32,7 +32,7 @@ import { bytesToHex, hexToBytes, randomBytes } from './setup.js';
 // Builds a single blind-sign round: bank keypair + (k, R, α, β, serial, amount,
 // R', e', e, s, s'). Tests below either reuse this directly or mutate one
 // field to set up a tamper scenario.
-function makeHappyRound(amount = 100) {
+async function makeHappyRound (amount = 100) {
   const kp = generateKeyPair();
   const k = bytesToScalar(randomBytes(32)) % (n - 1n) + 1n; // [1, n-1]
   const { R, RBytes } = bankStep1(k);
@@ -48,21 +48,21 @@ function makeHappyRound(amount = 100) {
 
 describe('M2 · schnorrBlind.js — 3-move single-candidate protocol', () => {
   describe('correctness: blind → sign → unblind → verify', () => {
-    it('accepts a properly unblinded signature (s\'·G = R\' + e\'·P)', () => {
-      const r = makeHappyRound();
+    it('accepts a properly unblinded signature (s\'·G = R\' + e\'·P)', async () => {
+      const r = await makeHappyRound();
       // Bank side verify (the authority check)
       expect(verifySig(r.RPrime, r.sPrime, r.serial, r.amount, r.kp.publicKey)).toBe(true);
     });
 
     it('client-side verifySig also passes (merchant local preview)', async () => {
       const { verifySig: clientVerify } = await import('../src/crypto/client/schnorrBlindClient.js');
-      const r = makeHappyRound();
+      const r = await makeHappyRound();
       expect(clientVerify(r.RPrime, r.sPrime, r.serial, r.amount, r.kp.publicKey)).toBe(true);
     });
 
-    it('multiple rounds with fresh k/α/β produce different tokens', () => {
-      const r1 = makeHappyRound();
-      const r2 = makeHappyRound();
+    it('multiple rounds with fresh k/α/β produce different tokens', async () => {
+      const r1 = await makeHappyRound();
+      const r2 = await makeHappyRound();
       expect(bytesToHex(r1.RPrime)).not.toBe(bytesToHex(r2.RPrime));
       expect(r1.sPrime).not.toBe(r2.sPrime);
       expect(bytesToHex(r1.serial)).not.toBe(bytesToHex(r2.serial));
@@ -70,20 +70,20 @@ describe('M2 · schnorrBlind.js — 3-move single-candidate protocol', () => {
   });
 
   describe('tampering: any single-byte mutation → verify fails', () => {
-    it('tampered serial (1 byte flipped) → reject', () => {
-      const r = makeHappyRound();
+    it('tampered serial (1 byte flipped) → reject', async () => {
+      const r = await makeHappyRound();
       const tampered = new Uint8Array(r.serial);
       tampered[5] ^= 0x01;
       expect(verifySig(r.RPrime, r.sPrime, tampered, r.amount, r.kp.publicKey)).toBe(false);
     });
 
-    it('tampered amount (off-by-one) → reject', () => {
-      const r = makeHappyRound();
+    it('tampered amount (off-by-one) → reject', async () => {
+      const r = await makeHappyRound();
       expect(verifySig(r.RPrime, r.sPrime, r.serial, r.amount + 1, r.kp.publicKey)).toBe(false);
     });
 
-    it('tampered R\' (1 byte flipped, still 33 bytes) → reject', () => {
-      const r = makeHappyRound();
+    it('tampered R\' (1 byte flipped, still 33 bytes) → reject', async () => {
+      const r = await makeHappyRound();
       const tampered = new Uint8Array(r.RPrime);
       // flip a byte in the middle of the x-coordinate (not the prefix) so the
       // length is still 33 but the point is different (likely off-curve).
@@ -91,8 +91,8 @@ describe('M2 · schnorrBlind.js — 3-move single-candidate protocol', () => {
       expect(verifySig(tampered, r.sPrime, r.serial, r.amount, r.kp.publicKey)).toBe(false);
     });
 
-    it('tampered s\' (low bit flipped) → reject', () => {
-      const r = makeHappyRound();
+    it('tampered s\' (low bit flipped) → reject', async () => {
+      const r = await makeHappyRound();
       const sPrimeBytes = scalarToBytes(r.sPrime);
       const tampered = new Uint8Array(sPrimeBytes);
       tampered[31] ^= 0x01; // flip the lowest bit
@@ -102,7 +102,7 @@ describe('M2 · schnorrBlind.js — 3-move single-candidate protocol', () => {
   });
 
   describe('linearity: same (k, x) → s scales linearly with e', () => {
-    it('s2 - s1 = (e2 - e1)·x mod n', () => {
+    it('s2 - s1 = (e2 - e1)·x mod n', async () => {
       const kp = generateKeyPair();
       const k = bytesToScalar(randomBytes(32)) % (n - 1n) + 1n;
       const e1 = bytesToScalar(randomBytes(32)) % n;
@@ -115,62 +115,62 @@ describe('M2 · schnorrBlind.js — 3-move single-candidate protocol', () => {
   });
 
   describe('malformed-input rejection', () => {
-    it('verifySig returns false for s\' = 0', () => {
-      const r = makeHappyRound();
+    it('verifySig returns false for s\' = 0', async () => {
+      const r = await makeHappyRound();
       expect(verifySig(r.RPrime, 0n, r.serial, r.amount, r.kp.publicKey)).toBe(false);
     });
 
-    it('verifySig returns false for s\' ≥ n', () => {
-      const r = makeHappyRound();
+    it('verifySig returns false for s\' ≥ n', async () => {
+      const r = await makeHappyRound();
       expect(verifySig(r.RPrime, n + 1n, r.serial, r.amount, r.kp.publicKey)).toBe(false);
     });
 
-    it('verifySig returns false when R\' is not 33 bytes', () => {
-      const r = makeHappyRound();
+    it('verifySig returns false when R\' is not 33 bytes', async () => {
+      const r = await makeHappyRound();
       const badR = r.RPrime.slice(0, 32);
       expect(verifySig(badR, r.sPrime, r.serial, r.amount, r.kp.publicKey)).toBe(false);
     });
 
-    it('verifySig returns false when R\' is 33 bytes but not on curve', () => {
-      const r = makeHappyRound();
+    it('verifySig returns false when R\' is 33 bytes but not on curve', async () => {
+      const r = await makeHappyRound();
       const bad = new Uint8Array(33);
       bad[0] = 0x02;            // valid prefix
       bad.set(randomBytes(32), 1); // random x — almost certainly not on curve
       expect(verifySig(bad, r.sPrime, r.serial, r.amount, r.kp.publicKey)).toBe(false);
     });
 
-    it('verifySig returns false with wrong public key P', () => {
-      const r = makeHappyRound();
+    it('verifySig returns false with wrong public key P', async () => {
+      const r = await makeHappyRound();
       const otherKp = generateKeyPair();
       expect(verifySig(r.RPrime, r.sPrime, r.serial, r.amount, otherKp.publicKey)).toBe(false);
     });
 
-    it('hashToScalar throws on amount ≤ 0', () => {
-      const r = makeHappyRound();
+    it('hashToScalar throws on amount ≤ 0', async () => {
+      const r = await makeHappyRound();
       expect(() => hashToScalar(TOKEN_DOMAIN_TAG, r.RPrime, r.serial, 0, r.kp.publicKey)).toThrow();
       expect(() => hashToScalar(TOKEN_DOMAIN_TAG, r.RPrime, r.serial, -5, r.kp.publicKey)).toThrow();
     });
 
-    it('hashToScalar throws on serial length ≠ 32', () => {
-      const r = makeHappyRound();
+    it('hashToScalar throws on serial length ≠ 32', async () => {
+      const r = await makeHappyRound();
       const badSerial = new Uint8Array(31);
       expect(() => hashToScalar(TOKEN_DOMAIN_TAG, r.RPrime, badSerial, r.amount, r.kp.publicKey)).toThrow();
     });
 
-    it('hashToScalar throws on R\' length ≠ 33', () => {
-      const r = makeHappyRound();
+    it('hashToScalar throws on R\' length ≠ 33', async () => {
+      const r = await makeHappyRound();
       const badR = new Uint8Array(34);
       expect(() => hashToScalar(TOKEN_DOMAIN_TAG, badR, r.serial, r.amount, r.kp.publicKey)).toThrow();
     });
   });
 
   describe('bankStep1 / bankStep3 invariants', () => {
-    it('bankStep1 throws on k out of range (k = 0 or k = n)', () => {
+    it('bankStep1 throws on k out of range (k = 0 or k = n)', async () => {
       expect(() => bankStep1(0n)).toThrow();
       expect(() => bankStep1(n)).toThrow();
     });
 
-    it('bankStep1 produces R = k·G (point-on-curve, decodable)', () => {
+    it('bankStep1 produces R = k·G (point-on-curve, decodable)', async () => {
       const k = bytesToScalar(randomBytes(32)) % (n - 1n) + 1n;
       const { R, RBytes } = bankStep1(k);
       // RBytes is 33 bytes with valid prefix
@@ -181,7 +181,7 @@ describe('M2 · schnorrBlind.js — 3-move single-candidate protocol', () => {
       expect(bytesToHex(RBytes)).toBe(bytesToHex(expected));
     });
 
-    it('bankStep3 returns s = (k + e·x) mod n', () => {
+    it('bankStep3 returns s = (k + e·x) mod n', async () => {
       const kp = generateKeyPair();
       const k = bytesToScalar(randomBytes(32)) % (n - 1n) + 1n;
       const e = bytesToScalar(randomBytes(32)) % n;

@@ -59,17 +59,16 @@ function hexToScalar(hex) {
 /**
  * Refund a session's amount back to its owner and flip status.
  * MUST run inside an open transaction (caller's runInvariantCheckedTx).
- * @param {import('better-sqlite3').Database} db
+ * @param {object} db — db/tx wrapper from models/db.js (runImmediateTx / getDb)
  * @param {{id:string, customer_id:number, amount:number}} session
  * @param {'aborted'|'cancelled'|'expired'} newStatus
  */
-export function refundAndClose(db, session, newStatus) {
-  db.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
+export async function refundAndClose(db, session, newStatus) {
+  await db.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
     .run(session.amount, session.customer_id);
-  db.prepare(`UPDATE withdrawal_sessions SET status = ? WHERE id = ?`)
+  await db.prepare(`UPDATE withdrawal_sessions SET status = ? WHERE id = ?`)
     .run(newStatus, session.id);
-  // M7: 写一笔 refund 流水，让用户在 /history 看到退款去向。
-  recordTransaction(db, {
+  await recordTransaction(db, {
     user_id: session.customer_id,
     kind: 'refund',
     amount: session.amount,
@@ -78,14 +77,12 @@ export function refundAndClose(db, session, newStatus) {
     session_id: session.id,
     note: `退款 (${newStatus})`,
   });
-  // Phase 1 (v5 §三 1.4)：在途项 -amount，balance +amount，公式两侧同步。
-  // 在调用方事务内调用——失败时整个 BEGIN IMMEDIATE 回滚。
-  assertInvariant(db);
+  await assertInvariant(db);
 }
 
 /**
  * Lazily refund + expire any of this customer's sessions past their TTL.
- * Runs in its own BEGIN IMMEDIATE so it cannot race with the init that
+ * Runs in its own runImmediateTx so it cannot race with the init that
  * follows. Called at the top of initWithdrawal (v3 §2.3 step ①).
  *
  * ISOLATION §一-1: refund credits customer.balance (the inverse of init's debit).
@@ -93,22 +90,18 @@ export function refundAndClose(db, session, newStatus) {
  * @param {number} customerId
  * @returns {number} count of sessions expired
  */
-export function lazyCleanupExpiredSessions(customerId) {
-  return runInvariantCheckedTx((db) => {
+export async function lazyCleanupExpiredSessions(customerId) {
+  return runInvariantCheckedTx(async (db) => {
     const now = new Date().toISOString();
-    const expired = db.prepare(
+    const expired = await db.prepare(
       `SELECT id, customer_id, amount FROM withdrawal_sessions
        WHERE customer_id = ? AND status IN ('pending','submitted') AND expires_at <= ?`,
     ).all(customerId, now);
     for (const s of expired) {
-      refundAndClose(db, s, 'expired');
+      await refundAndClose(db, s, 'expired');
     }
-    // Phase 1 (v5 §三 1.4)：所有 refundAndClose 已各自 assertInvariant，
-    // 但若 expired.length === 0 也要在末尾跑一次——保证调用方拿到的是
-    // 不变量已验证的状态（无遗漏）。条件加 expired.length === 0 是为了
-    // 避免重复跑（每次 refundAndClose 末尾已经 assert 过）。
     if (expired.length === 0) {
-      assertInvariant(db);
+      await assertInvariant(db);
     }
     return expired.length;
   });
@@ -119,7 +112,7 @@ export function lazyCleanupExpiredSessions(customerId) {
  *
  * Flow:
  *   1. lazyCleanupExpiredSessions (refund the customer's expired sessions)
- *   2. BEGIN IMMEDIATE:
+ *   2. runImmediateTx:
  *      - reject if a pending|submitted session still exists (409, 不变量 4)
  *      - reject if balance < amount (400)
  *      - debit balance
@@ -135,7 +128,7 @@ export function lazyCleanupExpiredSessions(customerId) {
  * @param {{customer_id:number, amount:number, denomination?:number}} args
  * @returns {{session_id:string, R:string[], amount:number, N:number, ttl_ms:number, key_id:number}}
  */
-export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
+export async function initWithdrawal({ customer_id, amount, denomination = 1 }) {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw new WithdrawalError(400, 'INVALID_AMOUNT', 'amount must be a positive integer');
   }
@@ -143,33 +136,22 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
     throw new WithdrawalError(400, 'INVALID_DENOMINATION',
       'denomination must be a positive integer');
   }
-  // L2 fix: reject denominations outside the whitelist. Without this, a user
-  // could request denom=999 — getOrGenerate(999) would auto-create a key,
-  // wasting key management space and producing an anonymity set of 1 (the
-  // user is the only one using that denom, destroying privacy).
   if (!DENOMINATIONS.includes(denomination)) {
     throw new WithdrawalError(400, 'INVALID_DENOMINATION',
       `denomination must be one of ${DENOMINATIONS.join(', ')}, got ${denomination}`);
   }
-  // Phase 6.1 语义校验：面额 = token 面值 = 取款金额。一次取款产一枚
-  // 该面额的 token。amount 必须等于 denomination，否则面额选择无意义
-  //（选了 1 BC 密钥却签 50 BC 的 token 会导致验签通过但面额不匹配）。
   if (amount !== denomination) {
     throw new WithdrawalError(400, 'AMOUNT_DENOMINATION_MISMATCH',
       `amount (${amount}) must equal denomination (${denomination}); ` +
       'one withdrawal produces one token of the selected denomination');
   }
 
-  // ① lazy-cleanup this customer's expired sessions before considering a new one
-  lazyCleanupExpiredSessions(customer_id);
+  await lazyCleanupExpiredSessions(customer_id);
 
-  // Phase 6.1: 确保该 denom 的 active 密钥存在（首次使用某面额时自动生成）
-  // 并获取 key_version，前端需要它写入 token v2 schema。
-  const keyId = getActiveKeyVersionByDenom(denomination);
+  const keyId = await getActiveKeyVersionByDenom(denomination);
 
-  return runInvariantCheckedTx((db) => {
-    // 不变量 4: at most one active session per customer
-    const active = db.prepare(
+  return runInvariantCheckedTx(async (db) => {
+    const active = await db.prepare(
       `SELECT id FROM withdrawal_sessions
        WHERE customer_id = ? AND status IN ('pending','submitted')`,
     ).get(customer_id);
@@ -178,8 +160,7 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
         'you already have an active withdrawal session; finish or cancel it first');
     }
 
-    // balance check + debit
-    const user = db.prepare(`SELECT balance FROM users WHERE id = ?`).get(customer_id);
+    const user = await db.prepare(`SELECT balance FROM users WHERE id = ?`).get(customer_id);
     if (!user) {
       throw new WithdrawalError(404, 'USER_NOT_FOUND', 'customer account not found');
     }
@@ -187,10 +168,9 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
       throw new WithdrawalError(400, 'INSUFFICIENT_BALANCE',
         `balance ${user.balance} < requested ${amount}`);
     }
-    db.prepare(`UPDATE users SET balance = balance - ? WHERE id = ?`)
+    await db.prepare(`UPDATE users SET balance = balance - ? WHERE id = ?`)
       .run(amount, customer_id);
 
-    // 不变量 5: N fresh k_i per session, never reused
     const N = CUT_AND_CHOOSE_N;
     const candidates = [];
     const Rlist = [];
@@ -204,18 +184,14 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
 
     const sessionId = randomUUID();
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO withdrawal_sessions
          (id, customer_id, amount, denomination, n_candidates, candidates, status, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
     ).run(sessionId, customer_id, amount, denomination, N, JSON.stringify(candidates), expiresAt);
 
-    // Phase 1 (v5 §三 1.4)：在途项 +amount，balance -amount，公式两侧同步。
-    assertInvariant(db);
+    await assertInvariant(db);
 
-    // M6: return ttl_ms so the frontend countdown uses the server's real TTL
-    // (single source of truth — BC_SESSION_TTL_MS may override the default).
-    // Phase 6.1: 返回 key_id（该 denom 的 active key_version）。
     return { session_id: sessionId, R: Rlist, amount, N, ttl_ms: SESSION_TTL_MS, key_id: keyId };
   });
 }
@@ -232,8 +208,7 @@ export function initWithdrawal({ customer_id, amount, denomination = 1 }) {
  *   args.candidates: [{ e:hex, R_prime:hex, serial:hex }, ...] length N
  * @returns {{j:number}}
  */
-export function submitCandidates({ session_id, customer_id, candidates }) {
-  // ── API defense: α/β must never be submitted ── (不变量 3, 教授必测 #1)
+export async function submitCandidates({ session_id, customer_id, candidates }) {
   if (!Array.isArray(candidates)) {
     throw new WithdrawalError(400, 'INVALID_CANDIDATES', 'candidates must be an array');
   }
@@ -251,10 +226,8 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
     }
   }
 
-  // ⚠退款必须在事务内正常提交（不能 throw 导致回滚）：用 result 对象携带
-  // error 出事务，在事务外 throw，这样退款 UPDATE 持久化，错误仍正确传播。
-  const result = runInvariantCheckedTx((db) => {
-    const session = db.prepare(
+  const result = await runInvariantCheckedTx(async (db) => {
+    const session = await db.prepare(
       `SELECT * FROM withdrawal_sessions WHERE id = ? AND customer_id = ?`,
     ).get(session_id, customer_id);
     if (!session) {
@@ -265,9 +238,8 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
       return { error: new WithdrawalError(409, 'WRONG_STATUS',
         `session is ${session.status}, must be pending to submit`) };
     }
-    // expiry check — refund + flip to expired so the user can start a new one
     if (new Date(session.expires_at) <= new Date()) {
-      refundAndClose(db, session, 'expired');
+      await refundAndClose(db, session, 'expired');
       return { error: new WithdrawalError(400, 'SESSION_EXPIRED',
         'session TTL elapsed; balance refunded, please re-init') };
     }
@@ -276,7 +248,6 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
         `expected ${session.n_candidates} candidates, got ${candidates.length}`) };
     }
 
-    // merge e/R_prime/serial into the stored candidates, pick j
     const stored = JSON.parse(session.candidates);
     for (let i = 0; i < candidates.length; i++) {
       stored[i].e = candidates[i].e;
@@ -286,16 +257,13 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
     }
     const j = pickRandomJ(session.n_candidates);
 
-    db.prepare(
+    await db.prepare(
       `UPDATE withdrawal_sessions
          SET candidates = ?, j_index = ?, status = 'submitted'
        WHERE id = ?`,
     ).run(JSON.stringify(stored), j, session_id);
 
-    // Phase 1 (v5 §三 1.4 checklist #5)：submit 路径不改 balance/reserve，
-    // 但 status pending → submitted 都在在途项集合内，公式两侧仍同步。
-    // 末尾跑一次 assertInvariant 保证调用方拿到的是已验证状态。
-    assertInvariant(db);
+    await assertInvariant(db);
 
     return { j };
   });
@@ -319,7 +287,7 @@ export function submitCandidates({ session_id, customer_id, candidates }) {
  *   args.revealed: [{ i:number, alpha:hex, beta:hex }, ...] length N-1, i ≠ j
  * @returns {{s_j:string}} hex of 32-byte s
  */
-export function revealAndSign({ session_id, customer_id, revealed }) {
+export async function revealAndSign({ session_id, customer_id, revealed }) {
   if (!Array.isArray(revealed)) {
     throw new WithdrawalError(400, 'INVALID_REVEALED', 'revealed must be an array');
   }
@@ -333,10 +301,8 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
     }
   }
 
-  // ⚠退款必须在事务内正常提交（不能 throw 导致回滚）：用 result 对象携带
-  // error 出事务，在事务外 throw，这样退款/abort UPDATE 持久化，错误仍正确传播。
-  const result = runInvariantCheckedTx((db) => {
-    const session = db.prepare(
+  const result = await runInvariantCheckedTx(async (db) => {
+    const session = await db.prepare(
       `SELECT * FROM withdrawal_sessions WHERE id = ? AND customer_id = ?`,
     ).get(session_id, customer_id);
     if (!session) {
@@ -348,20 +314,18 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
         `session is ${session.status}, must be submitted to reveal`) };
     }
     if (new Date(session.expires_at) <= new Date()) {
-      refundAndClose(db, session, 'expired');
+      await refundAndClose(db, session, 'expired');
       return { error: new WithdrawalError(400, 'SESSION_EXPIRED',
         'session TTL elapsed; balance refunded') };
     }
 
     const j = session.j_index;
-    // ── API defense: revealing i === j leaks the signed candidate's blinders ──
     for (const r of revealed) {
       if (r.i === j) {
         return { error: new WithdrawalError(400, 'SIGNED_CANDIDATE_REVEALED',
           'cannot reveal blinders for the signed candidate j — blindness would break') };
       }
     }
-    // revealed set must be exactly {0..N-1} \ {j}
     const expectedCount = session.n_candidates - 1;
     if (revealed.length !== expectedCount) {
       return { error: new WithdrawalError(400, 'REVEAL_COUNT',
@@ -380,12 +344,9 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
     }
 
     const stored = JSON.parse(session.candidates);
-    // Phase 6.1: 从 session 行读 denomination，选对应面额的密钥验签 + 签名。
-    // denomination 在 init 时写入 session 行，用户无法篡改。
     const denomination = session.denomination || 1;
-    const publicKey = getActivePublicKeyByDenom(denomination);
+    const publicKey = await getActivePublicKeyByDenom(denomination);
 
-    // verify every i ≠ j
     for (const r of revealed) {
       const cand = stored[r.i];
       const ok = verifyRevealed({
@@ -399,39 +360,30 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
         e: hexToScalar(cand.e),
       });
       if (!ok) {
-        // cut-and-choose failed → refund + abort (MUST commit, not rollback)
-        refundAndClose(db, session, 'aborted');
+        await refundAndClose(db, session, 'aborted');
         return { error: new WithdrawalError(400, 'CUT_AND_CHOOSE_FAILED',
           `verification failed for candidate i=${r.i}; session aborted and balance refunded`) };
       }
     }
 
-    // all verified → sign candidate j: s_j = (k_j + e_j·x) mod n
     const candJ = stored[j];
     const kJ = hexToScalar(candJ.k);
     const eJ = hexToScalar(candJ.e);
-    const x = bytesToScalar(getPrivateKeyByDenom(denomination));
+    const x = bytesToScalar(await getPrivateKeyByDenom(denomination));
     const sJ = bankStep3(kJ, eJ, x);
 
-    db.prepare(
+    await db.prepare(
       `UPDATE withdrawal_sessions SET status = 'committed' WHERE id = ?`,
     ).run(session_id);
 
-    // Phase 1 (v5 §三 1.4 + 1.7)：在途项 -amount，total_issued +amount，
-    // 公式两侧同步。total_issued 必须与 status='committed' 在同一
-    // BEGIN IMMEDIATE 内，否则中途崩溃会让"已签发但 total_issued 没加"
-    // 的半状态破坏不变量。token v2 落地：返回值带 key_id=1。
-    db.prepare(
+    await db.prepare(
       `UPDATE bank_reserve
           SET total_issued = total_issued + ?,
               updated_at = CURRENT_TIMESTAMP
         WHERE id = 1`
     ).run(session.amount);
 
-    // M7: 写一笔 withdraw 流水，让用户在 /history 看到取款去向。
-    // counterparty = 'bank'（对手方是银行）；serial 留空（token 的 serial
-    // 存在 session.candidates[j].serial，但这里不提取，流水层只记金额与方向）。
-    recordTransaction(db, {
+    await recordTransaction(db, {
       user_id: customer_id,
       kind: 'withdraw',
       amount: session.amount,
@@ -441,8 +393,7 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
       note: '取款',
     });
 
-    // Phase 3 (N1 落地)：withdraw 审计日志写在事务内
-    logAction({
+    await logAction({
       actor_id: customer_id,
       action: 'withdraw',
       amount: session.amount,
@@ -450,11 +401,9 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
       db,
     });
 
-    assertInvariant(db);
+    await assertInvariant(db);
 
-    // Phase 3 (v5 §三 3.2)：返回真实 active key_version，不再硬编码 1。
-    // 前端取 token v2 schema 的 key_id = 此值，支付/退币时拿它查公钥验签。
-    return { s_j: scalarToHex(sJ), key_id: getActiveKeyVersionByDenom(denomination) };
+    return { s_j: scalarToHex(sJ), key_id: await getActiveKeyVersionByDenom(denomination) };
   });
 
   if (result.error) throw result.error;
@@ -467,9 +416,9 @@ export function revealAndSign({ session_id, customer_id, revealed }) {
  * @param {{session_id:string, customer_id:number}} args
  * @returns {{refunded:number, new_balance:number}}
  */
-export function cancelWithdrawal({ session_id, customer_id }) {
-  return runInvariantCheckedTx((db) => {
-    const session = db.prepare(
+export async function cancelWithdrawal({ session_id, customer_id }) {
+  return runInvariantCheckedTx(async (db) => {
+    const session = await db.prepare(
       `SELECT * FROM withdrawal_sessions WHERE id = ? AND customer_id = ?`,
     ).get(session_id, customer_id);
     if (!session) {
@@ -480,8 +429,8 @@ export function cancelWithdrawal({ session_id, customer_id }) {
       throw new WithdrawalError(400, 'NOT_CANCELLABLE',
         `session is ${session.status}; only pending|submitted can be cancelled`);
     }
-    refundAndClose(db, session, 'cancelled');
-    const user = db.prepare(`SELECT balance FROM users WHERE id = ?`).get(customer_id);
+    await refundAndClose(db, session, 'cancelled');
+    const user = await db.prepare(`SELECT balance FROM users WHERE id = ?`).get(customer_id);
     return { refunded: session.amount, new_balance: user.balance };
   });
 }

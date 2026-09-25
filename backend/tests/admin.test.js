@@ -25,28 +25,24 @@
 //       通过 customer token 被拒来验证否定授权语义。
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb, queryOne } from '../src/models/db.js';
+import { getDb, closeDb, queryOne } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import { logAction } from '../src/services/auditService.js';
 import { createUser } from '../src/services/userService.js';
 import { hashPassword, generateToken } from '../src/services/authService.js';
 import { getOrGenerate, getActiveKeyVersion, _resetCacheForTest } from '../src/services/bankKeyService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-p3-admin.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-
-initSchema();
-
+ensureDatabaseUrl();
 const server = http.createServer(app);
 let baseUrl;
 
-async function api(path, { method = 'GET', token, body } = {}) {
+async function api (path, { method = 'GET', token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${baseUrl}${path}`, {
@@ -70,36 +66,37 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   const db = getDb();
-  db.exec('DELETE FROM audit_log;');
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  db.exec('DELETE FROM users;');
-  db.exec('DELETE FROM bank_keys;');
-  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
+  await resetTestDb();
+  await db.exec('DELETE FROM audit_log;');
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
+  await db.exec('DELETE FROM users;');
+  await db.exec('DELETE FROM bank_keys;');
+  await db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   const aHash = await hashPassword(ADMIN.password);
-  const aUser = createUser(ADMIN.username, aHash, ADMIN.role);
+  const aUser = await createUser(ADMIN.username, aHash, ADMIN.role);
   adminToken = generateToken(aUser);
 
   const cHash = await hashPassword(CUSTOMER.password);
-  const cUser = createUser(CUSTOMER.username, cHash, CUSTOMER.role);
+  const cUser = await createUser(CUSTOMER.username, cHash, CUSTOMER.role);
   customerToken = generateToken(cUser);
 
   // Seed the active bank key (needed for rotate-key test)
-  getOrGenerate();
+  await getOrGenerate();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   const db = getDb();
-  db.exec('DELETE FROM audit_log;');
+  await db.exec('DELETE FROM audit_log;');
 });
 
-afterAll(() => {
-  closeDb();
+afterAll(async () => {
+  await closeTestDb();
   server.close();
   for (const suffix of ['', '-wal', '-shm']) {
-    try { rmSync(TEST_DB_PATH + suffix, { force: true }); } catch {}
+
   }
 });
 
@@ -118,8 +115,8 @@ describe('Phase 3 · /api/admin/audit + /api/admin/rotate-key (requireAdmin midd
 
   it('GET /api/admin/audit with admin token → 200 + paginated structure', async () => {
     // Seed 2 audit entries
-    logAction({ actor_id: 1, action: 'deposit', amount: 100 });
-    logAction({ actor_id: 2, action: 'withdraw', amount: 30 });
+    await logAction({ actor_id: 1, action: 'deposit', amount: 100 });
+    await logAction({ actor_id: 2, action: 'withdraw', amount: 30 });
 
     const res = await api('/api/admin/audit?page=1&pageSize=10', { token: adminToken });
     expect(res.status).toBe(200);
@@ -136,9 +133,9 @@ describe('Phase 3 · /api/admin/audit + /api/admin/rotate-key (requireAdmin midd
   });
 
   it('GET /api/admin/audit?action=deposit returns only deposit entries', async () => {
-    logAction({ actor_id: 1, action: 'deposit', amount: 100 });
-    logAction({ actor_id: 2, action: 'withdraw', amount: 30 });
-    logAction({ actor_id: 3, action: 'deposit', amount: 200 });
+    await logAction({ actor_id: 1, action: 'deposit', amount: 100 });
+    await logAction({ actor_id: 2, action: 'withdraw', amount: 30 });
+    await logAction({ actor_id: 3, action: 'deposit', amount: 200 });
 
     const res = await api('/api/admin/audit?action=deposit', { token: adminToken });
     expect(res.status).toBe(200);
@@ -148,7 +145,7 @@ describe('Phase 3 · /api/admin/audit + /api/admin/rotate-key (requireAdmin midd
   });
 
   it('POST /api/admin/rotate-key with admin token → 200 + new key_version', async () => {
-    const before = getActiveKeyVersion();
+    const before = await getActiveKeyVersion();
     const res = await api('/api/admin/rotate-key', { method: 'POST', token: adminToken });
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('old_version');
@@ -158,11 +155,11 @@ describe('Phase 3 · /api/admin/audit + /api/admin/rotate-key (requireAdmin midd
 
     // Active key version in DB should be incremented
     _resetCacheForTest();
-    expect(getActiveKeyVersion()).toBe(before + 1);
+    expect(await getActiveKeyVersion()).toBe(before + 1);
 
     // An audit log entry for the rotation should have been written (bankKeyService
     // calls logAction with action='key_rotate' inside its tx).
-    const auditRow = queryOne(
+    const auditRow = await queryOne(
       `SELECT action, target FROM audit_log WHERE action = 'key_rotate'`,
     );
     expect(auditRow).toBeDefined();

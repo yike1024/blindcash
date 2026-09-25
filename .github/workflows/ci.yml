@@ -5,8 +5,10 @@
 # 注意事项：
 #   - clientBuild.test.js 真实跑 `npx vite build`，Windows 开发机 → ubuntu CI
 #     的 spawn 行为差异：CI 用 ubuntu-latest，shell 默认 bash，无问题。
-#   - better-sqlite3 是 native 模块，ubuntu CI 需要 python3 + make + g++ 编译。
-#     ubuntu-latest 默认已含；若缺失加 apt install。
+#   - bcrypt 是 native 模块，ubuntu CI 需要 python3 + make + g++ 兜底编译
+#     （prebuilt 通常已覆盖 node 24，保留做 fallback）。
+#   - 后端测试连 PostgreSQL：job 级 services 起 postgres:16-alpine，
+#     Test 步骤注入 DATABASE_URL。
 #   - BC_MASTER_KEY 不设时 bankKeyService 生成 ephemeral key（logger.warn），
 #     测试正常通过。
 
@@ -21,6 +23,21 @@ on:
 jobs:
   lint-test-build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: blindcash_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d blindcash_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,8 +51,7 @@ jobs:
             backend/package-lock.json
             frontend/package-lock.json
 
-      # better-sqlite3 + bcrypt native 编译依赖（ubuntu-latest 通常已含，
-      # 显式安装做兜底）
+      # bcrypt native 编译依赖兜底（prebuilt 通常已含，显式安装做 fallback）
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y python3 make g++
 
@@ -59,6 +75,7 @@ jobs:
         working-directory: backend
         env:
           NODE_ENV: test
+          DATABASE_URL: postgres://postgres:testpass@127.0.0.1:5432/blindcash_test
         run: npm test
 
       - name: Build (frontend)

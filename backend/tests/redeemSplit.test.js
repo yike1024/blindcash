@@ -24,13 +24,13 @@
 //       §3 — 不可追踪支付的盲签名基础。
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb, queryOne } from '../src/models/db.js';
+import { getDb, closeDb, queryOne } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
 import { bytesToHex, hexToBytes } from '../src/utils/hex.js';
@@ -41,16 +41,11 @@ import { hashPassword, generateToken } from '../src/services/authService.js';
 import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-p6-redeem-split.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-process.env.BC_DEMO_N = '10';
-
-initSchema();
-
-const server = http.createServer(app);
+ensureDatabaseUrl();
+process.env.BC_DEMO_N = '10';const server = http.createServer(app);
 let baseUrl;
 
-async function api(path, { method = 'GET', token, body } = {}) {
+async function api (path, { method = 'GET', token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${baseUrl}${path}`, {
@@ -68,18 +63,18 @@ let customerToken, customerId;
 
 // ── helpers ──
 
-function scalarToHexFixed(s) {
+function scalarToHexFixed (s) {
   let h = s.toString(16);
   while (h.length < 64) h = '0' + h;
   return h;
 }
-function hexToScalarFixed(hex) {
+function hexToScalarFixed (hex) {
   let v = 0n;
   for (let i = 0; i < hex.length; i++) v = (v << 4n) | BigInt(parseInt(hex[i], 16));
   return v;
 }
 
-function clientBuildCandidates(RHexList, amount, publicKeyHex) {
+async function clientBuildCandidates (RHexList, amount, publicKeyHex) {
   const publicKey = hexToBytes(publicKeyHex);
   const candidates = [];
   const blinders = [];
@@ -102,7 +97,7 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
 }
 
 /** Mint a token at the given denomination. Returns the v2 token shape. */
-async function mintToken(amount, denomination = 1) {
+async function mintToken (amount, denomination = 1) {
   const init = await api('/api/withdraw/init', {
     method: 'POST', token: customerToken, body: { amount, denomination },
   });
@@ -112,7 +107,7 @@ async function mintToken(amount, denomination = 1) {
   // Fetch pubkey for this denomination
   const pubRes = await api('/api/bank/pubkeys');
   const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
-  const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
+  const { candidates, blinders } = await clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', {
     method: 'POST', token: customerToken,
@@ -155,36 +150,37 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  db.exec('DELETE FROM audit_log;');
-  db.exec('DELETE FROM users;');
-  db.exec('DELETE FROM bank_keys;');
-  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
+  await resetTestDb();
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
+  await db.exec('DELETE FROM audit_log;');
+  await db.exec('DELETE FROM users;');
+  await db.exec('DELETE FROM bank_keys;');
+  await db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   const cHash = await hashPassword(CUSTOMER.password);
-  const cUser = createUser(CUSTOMER.username, cHash, CUSTOMER.role);
+  const cUser = await createUser(CUSTOMER.username, cHash, CUSTOMER.role);
   customerToken = generateToken(cUser);
   customerId = cUser.id;
 
   // Seed keys for all denominations
-  // (getOrGenerate(denom) is called lazily by initWithdrawal, but
+  // (await getOrGenerate(denom) is called lazily by initWithdrawal, but
   //  ensure they exist before tests start)
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   const db = getDb();
-  resetBalancesAndReserve(db);
-  db.exec('DELETE FROM audit_log;');
-  fundUser(customerId, 200);
+  await resetBalancesAndReserve(db);
+  await db.exec('DELETE FROM audit_log;');
+  await fundUser(customerId, 200);
 });
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
-  closeDb();
+  await closeTestDb();
   for (const suffix of ['', '-wal', '-shm']) {
-    try { rmSync(TEST_DB_PATH + suffix, { force: true }); } catch {}
+
   }
 });
 
@@ -236,7 +232,7 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
       method: 'POST', token: customerToken,
       body: { ...tok, split_denomination: 5 },
     });
-    const row = queryOne('SELECT denomination, amount FROM spent_coins WHERE serial = ?',
+    const row = await queryOne('SELECT denomination, amount FROM spent_coins WHERE serial = ?',
       [Buffer.from(hexToBytes(tok.serial))]);
     expect(row.denomination).toBe(5); // split_denomination, not original 50
     expect(row.amount).toBe(50);
@@ -250,7 +246,7 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
       method: 'POST', token: customerToken,
       body: { ...tok, split_denomination: 5 },
     });
-    const tx = queryOne(
+    const tx = await queryOne(
       "SELECT kind, amount, counterparty, note FROM transactions WHERE kind = 'redeem_split' AND user_id = ? ORDER BY id DESC LIMIT 1",
       [customerId],
     );
@@ -267,7 +263,7 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
       method: 'POST', token: customerToken,
       body: { ...tok, split_denomination: 5 },
     });
-    const audit = queryOne(
+    const audit = await queryOne(
       "SELECT action, amount FROM audit_log WHERE action = 'redeem_split' AND actor_id = ? ORDER BY id DESC LIMIT 1",
       [customerId],
     );
@@ -281,7 +277,7 @@ describe('Phase 6.2 · /api/bank/redeem-split — happy path', () => {
 // ERROR CASES
 // ════════════════════════════════════════════════════════════════
 
-describe('Phase 6.2 · /api/bank/redeem-split — errors', () => {
+describe('Phase 6.2 · /api/bank/redeem-split — errors', async () => {
   it('no Authorization → 401', async () => {
     const res = await api('/api/bank/redeem-split', {
       method: 'POST',

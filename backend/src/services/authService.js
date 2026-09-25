@@ -19,7 +19,14 @@ import jwt from 'jsonwebtoken';
 const BCRYPT_ROUNDS = 12;
 
 /** JWT secret — MUST be set via env in production. Fallback is dev-only. */
-const JWT_SECRET = process.env.BC_JWT_SECRET || 'blindcash-dev-secret-change-me';
+const JWT_SECRET = (() => {
+  const secret = process.env.BC_JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('BC_JWT_SECRET must be set in production — refusing to start with a known dev secret.');
+  }
+  return 'blindcash-dev-secret-change-me';
+})();
 
 /** JWT token expiry — 24 hours (plenty for a course project). */
 const JWT_EXPIRES_IN = '24h';

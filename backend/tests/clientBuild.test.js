@@ -29,7 +29,7 @@ const FRONTEND_DIR = join(__dirname, '..', '..', 'frontend');
 
 // Helper: spawn `npx vite build` in the frontend dir, capture stdout/stderr,
 // resolve to { code, stderr }. Used to assert the bundle succeeds.
-function runViteBuild() {
+async function runViteBuild () {
   return new Promise((resolve) => {
     // Use npx so we don't depend on a specific vite binary path; on Windows
     // npx lives at node_modules/.bin/npx.cmd, which spawn finds via PATH.
@@ -79,7 +79,7 @@ describe('M2 · clientBuild — vite bundle-ability of crypto/client/*', () => {
   }, 90000);
 });
 
-describe('M2 · clientBuild — crypto/client/* runs under happy-dom (browser env)', () => {
+describe('M2 · clientBuild — crypto/client/* runs under happy-dom (browser env)', async () => {
   // The // @vitest-environment happy-dom docblock above switches this whole
   // file into a browser-like env. happy-dom exposes globalThis.crypto (Web
   // Crypto API) but does NOT expose Node's `crypto` module or `node:crypto`.
@@ -117,7 +117,7 @@ describe('M2 · clientBuild — crypto/client/* runs under happy-dom (browser en
     const { randomBytes } = await import('./setup.js');
 
     const kp = generateKeyPair();
-    const k = BigInt('0x' + bytesToHexLocal(randomBytes(32))) % (n - 1n) + 1n;
+    const k = BigInt('0x' + await bytesToHexLocal(randomBytes(32))) % (n - 1n) + 1n;
     const { RBytes } = bankStep1(k);
     const serial = randomBytes(32);
     const amount = 100;
@@ -144,7 +144,7 @@ describe('M2 · clientBuild — crypto/client/* runs under happy-dom (browser en
 
 // ── internal: bytesToHex (avoid pulling setup.js's bytesToHex which would
 //    need a separate import; we inline for the test's local k derivation)
-function bytesToHexLocal(bytes) {
+async function bytesToHexLocal (bytes) {
   let s = '';
   for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, '0');
   return s;

@@ -11,6 +11,7 @@ import { authenticateJWT } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
 import { queryAuditLog } from '../services/auditService.js';
 import { rotateKey } from '../services/bankKeyService.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
@@ -19,31 +20,28 @@ const router = Router();
 //   page     — 1-based page number (default 1)
 //   pageSize — entries per page (default 20, max 100)
 //   action   — filter by action type (optional, e.g. 'deposit', 'key_rotate')
-router.get('/audit', authenticateJWT, requireRole('admin'), (req, res) => {
+router.get('/audit', authenticateJWT, requireRole('admin'), async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
     const action = req.query.action || undefined;
 
-    const result = queryAuditLog({ page, pageSize, action });
+    const result = await queryAuditLog({ page, pageSize, action });
     return res.json(result);
   } catch (err) {
-    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+    logger.error({ err: err.message, stack: err.stack }, 'admin audit route unexpected error');
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
   }
 });
 
-// POST /api/admin/rotate-key — 触发密钥轮换
-// Phase 6.1: 支持 denomination 参数（轮换特定面额的密钥）。
-//   body: { denomination?: number } — 缺省 1
-// 旧密钥标记 retired + retired_until=now+90d，生成新 active 密钥。
-// 返回新旧 key_version + denomination。
-router.post('/rotate-key', authenticateJWT, requireRole('admin'), (req, res) => {
+router.post('/rotate-key', authenticateJWT, requireRole('admin'), async (req, res) => {
   try {
     const denomination = req.body?.denomination ?? 1;
-    const result = rotateKey(denomination, req.user.userId);
+    const result = await rotateKey(denomination, req.user.userId);
     return res.json(result);
   } catch (err) {
-    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+    logger.error({ err: err.message, stack: err.stack }, 'admin rotate-key route unexpected error');
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
   }
 });
 

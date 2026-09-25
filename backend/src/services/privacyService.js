@@ -22,58 +22,47 @@ import { getDenominationByVersion } from './bankKeyService.js';
 
 /**
  * Compute anonymity set report for a list of tokens.
- *
- * @param {Array<{key_id?:number}>} tokens — token list from client wallet
- *   (only key_id is needed; serial/R'/s' are NOT sent to limit info leak)
- * @returns {{report: Array<{denomination:number, key_version:number, anonymity_set_size:number, your_tokens:number}>, limitations: string[]}}
+ * @returns {Promise<{report: Array, limitations: string[]}>}
  */
-export function computeAnonymityReport(tokens) {
+export async function computeAnonymityReport(tokens) {
   if (!Array.isArray(tokens)) {
     return { report: [], limitations: PRIVACY_LIMITATIONS };
   }
 
-  // Group tokens by (denom, key_version) to count how many the user holds
-  const userHoldings = new Map(); // "denom:kv" → count
-  const seenPairs = new Set();    // dedup for report rows
+  const userHoldings = new Map();
+  const seenPairs = new Set();
 
   for (const token of tokens) {
     if (token?.key_id == null) continue;
     let denom;
     try {
-      denom = getDenominationByVersion(token.key_id);
+      denom = await getDenominationByVersion(token.key_id);
     } catch {
-      // Unknown key_version — skip (shouldn't happen for valid tokens)
       continue;
     }
     const pairKey = `${denom}:${token.key_id}`;
     userHoldings.set(pairKey, (userHoldings.get(pairKey) ?? 0) + 1);
   }
 
-  // For each unique (denom, key_version), query spent_coins for set size
   const report = [];
   for (const [pairKey, userCount] of userHoldings) {
     const [denomStr, kvStr] = pairKey.split(':');
     const denom = parseInt(denomStr, 10);
     const keyVersion = parseInt(kvStr, 10);
 
-    const row = queryOne(
-      `SELECT COUNT(*) AS cnt FROM spent_coins
-       WHERE denomination = ? AND key_version = ?`,
-      [denom, keyVersion],
+    const row = await queryOne(
+      `SELECT COUNT(*) AS cnt FROM spent_coins WHERE key_version = ?`,
+      [keyVersion],
     );
 
     report.push({
       denomination: denom,
       key_version: keyVersion,
-      // Anonymity set = total tokens spent with same (denom, key_version)
-      // This includes the user's own spent tokens + all other users' tokens
       anonymity_set_size: row?.cnt ?? 0,
-      // How many tokens the user currently holds with this (denom, key_version)
       your_tokens: userCount,
     });
   }
 
-  // Sort by denomination ascending for consistent display
   report.sort((a, b) => a.denomination - b.denomination);
 
   return { report, limitations: PRIVACY_LIMITATIONS };

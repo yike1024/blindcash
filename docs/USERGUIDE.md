@@ -24,16 +24,18 @@
 | 角色 | 可访问页面 | 可访问 API | 初始余额 |
 |------|-----------|-----------|----------|
 | 银行（系统） | — | 启动时自动初始化密钥对 | — |
-| 付款人 customer | `/dashboard` `/bank` `/withdraw` | `/api/auth/*` `/api/withdraw/*` `/api/bank/deposit` `/api/bank/redeem` | 0（需先充值） |
-| 收款人 merchant | `/dashboard` `/payment` | `/api/auth/*` `/api/payment` `/api/bank/pubkey` | 0 |
+| 付款人 customer | `/dashboard` `/bank` `/wallet` `/withdraw` `/history` `/privacy` | 所有用户级 API（注册/登录/存取款/收款/账本，见下） | 0（需先充值） |
+| 收款人 merchant | 同 customer（角色解锁后页面互通，可 `/payment` 收款、`/withdraw` 取款） | 所有用户级 API | 0 |
+| 管理员 admin | 无独立前端 UI（通过 API / DB 操作） | `/api/admin/audit` `/api/admin/rotate-key` `/api/bank/reserve` | — |
 
-**角色互斥**：注册时选定角色后不可切换；DB 层 `CHECK(role IN ('customer','merchant'))` 约束。
+**角色互斥**：注册时选定角色后不可切换；DB 层 `CHECK(role IN ('customer','merchant','admin'))` 约束。
 
-**角色守卫**：
+**角色解锁（M7）**：
 
-- customer 调 `/api/payment` → 403 FORBIDDEN
-- merchant 调 `/api/withdraw/*` → 403 FORBIDDEN
+- `/api/withdraw/*` 与 `/api/payment` 对**任何已登录用户**开放——customer 可收款、merchant 可取款，形成 Chaum 式转账闭环
 - 未登录调任意受保护路由 → 401 UNAUTHORIZED
+- 仅 admin 专有接口（`/api/admin/audit`、`/api/admin/rotate-key`、`/api/bank/reserve`）要求 `requireRole('admin')`，非 admin → 403 FORBIDDEN
+- admin 不可通过 `/register` 创建（注册仅允许 customer / merchant），需数据库手动植入
 
 ---
 
@@ -61,8 +63,8 @@ BC_DEMO_N=10 npm run dev
 |------|-----|------|
 | 前端首页 | http://localhost:5174 | 自动跳转到 /login 或 /dashboard |
 | 注册页 | http://localhost:5174/register | 选择角色注册 |
-| 登录页 | http://localhost:5174/login | 登录后按角色跳转 |
-| 健康检查 | http://localhost:4100/api/health | 后端状态 + milestone 标识 |
+| 登录页 | http://localhost:5174/login | 登录后跳转 /dashboard |
+| 健康检查 | http://localhost:4101/api/health | 后端状态 + milestone 标识（默认 4100，本机 .env 覆盖为 4101） |
 
 ### 2.3 默认账号策略
 
@@ -86,25 +88,26 @@ BC_DEMO_N=10 npm run dev
 
 服务启动时执行 [app.js initDatabase()](../backend/src/app.js#L40)：
 
-1. `initSchema()` —— 创建 4 张表（users / bank_keys / withdrawal_sessions / spent_coins）+ 2 个唯一索引
-2. `bankKeyService.getOrGenerate()` —— 若 `bank_keys` 表无 singleton 行（id=1）则生成新密钥对；否则读取已有密钥对（避免重生成使旧 token 失效）
-3. 控制台输出：`[backend] Bank public key: <33-byte hex>`
+1. `runMigrations()` —— 运行 001-010 迁移，创建 9 张表（users / bank_keys / withdrawal_sessions / spent_coins / transactions / bank_reserve / audit_log / payment_escrows / schema_migrations）
+2. `bankKeyService.getOrGenerate()` —— 按面额 `DENOMINATIONS = [1, 5, 10, 50, 100]` 检查 `bank_keys` 表，缺失则生成对应密钥对；已存在则读取（避免重生成使旧 token 失效）
+3. 控制台输出：`[backend] Bank public keys initialized for denominations [1,5,10,50,100]`
 
 ### 3.2 银行在 4-move 协议中的角色
 
 | 步骤 | 银行执行 | API 入口 |
 |------|----------|----------|
-| ① init | 生成 N 个 (k_i, R_i = k_i·G)，存入 session | POST /api/withdraw/init（customer 调用） |
-| ② submit | 接收 N 个 (R'_i, e_i)，随机挑 j | POST /api/withdraw/submit（customer 调用） |
-| ⑤ reveal | 验证 i ≠ j 的 (α_i, β_i) 构造正确，计算 s_j = (k_j + e_j·x) mod n | POST /api/withdraw/reveal（customer 调用） |
-| ⑦ cancel | 退款 balance += amount，session 状态推进为 cancelled | POST /api/withdraw/cancel（customer 调用） |
+| ① init | 生成 N 个 (k_i, R_i = k_i·G)，存入 session | POST /api/withdraw/init（用户调用） |
+| ② submit | 接收 N 个 (R'_i, e_i)，随机挑 j | POST /api/withdraw/submit（用户调用） |
+| ⑤ reveal | 验证 i ≠ j 的 (α_i, β_i) 构造正确，计算 s_j = (k_j + e_j·x) mod n | POST /api/withdraw/reveal（用户调用） |
+| ⑦ cancel | 退款 balance += amount，session 状态推进为 cancelled | POST /api/withdraw/cancel（用户调用） |
 
 ### 3.3 银行在支付环节的角色
 
 | 步骤 | 银行执行 | API 入口 |
 |------|----------|----------|
 | 预验签 | — | 客户端本地调用 `verifySig`（不经银行） |
-| 兑付 | `BEGIN IMMEDIATE`：SELECT serial → 已存在则 409；否则 INSERT spent_coins + UPDATE merchant.balance | POST /api/payment（merchant 调用） |
+| 兑付 | `runImmediateTx`：SELECT serial → 已存在则 409；否则 INSERT spent_coins + UPDATE 收款方 balance | POST /api/payment（任意登录用户调用） |
+| 托管结算 | `runImmediateTx`：lock 占位 → confirm 转入商户 / cancel 退还顾客 | POST /api/payment/lock · confirm · cancel |
 
 ### 3.4 银行密钥安全边界
 
@@ -121,7 +124,7 @@ BC_DEMO_N=10 npm run dev
 ### 4.1 注册
 
 1. 浏览器访问 http://localhost:5174/register
-2. 填写：用户名（如 `alice`）、密码（如 `pw123`）、角色选 **customer**
+2. 填写：用户名（如 `alice`）、密码（如 `Pw12345!`）、角色选 **customer**
 3. 提交后自动跳转 /login
 4. 登录后跳转 /dashboard，可见初始余额 0；顶部出现"充值" CTA，点击进入 /bank
 
@@ -135,17 +138,17 @@ BC_DEMO_N=10 npm run dev
 
 1. 在 InputNumber 中输入充值金额（校验：1 ≤ amount ≤ 1000，单次上限 1000 BC；24h 滚动累计上限 5000 BC）
 2. 点击"充值"
-3. 后端 POST /api/bank/deposit：模拟外部法币入账，`BEGIN IMMEDIATE` 更新 `users.balance` 与 `bank_reserve.reserve_balance`，并调用 `assertInvariant` 校验
+3. 后端 POST /api/bank/deposit：模拟外部法币入账，`runImmediateTx` 更新 `users.balance` 与 `bank_reserve.reserve_balance`，并调用 `assertInvariant` 校验
 4. 成功后跳回 /dashboard，余额 += amount
 
 #### Tab 2：退币（redeem）
 
 1. 在 InputNumber 中输入退币金额（校验：1 ≤ amount ≤ balance）
 2. 点击"退币"
-3. 后端 POST /api/bank/redeem：用户将自有 BC 退回银行，`BEGIN IMMEDIATE` 更新 `users.balance` 与 `bank_reserve.reserve_balance`，调用 `assertInvariant`
+3. 后端 POST /api/bank/redeem：用户将自有 BC 退回银行，`runImmediateTx` 更新 `users.balance` 与 `bank_reserve.reserve_balance`，调用 `assertInvariant`
 4. 成功后跳回 /dashboard，余额 -= amount
 
-> **演示流程**：注册（balance=0）→ /bank 充值 100 BC → /withdraw 取款 30 BC → 复制 token → /payment（自身或另一商户）粘贴 token → 预验签 → 提交 → 商户 +30。
+> **演示流程**：注册（balance=0）→ /bank 充值 100 BC → /withdraw 取款 30 BC → 复制 token → /payment（自身或另一商户）粘贴 token → 预验签 → 提交 → 收款方 +30。
 
 ### 4.3 取款 4-step 向导
 
@@ -155,7 +158,7 @@ BC_DEMO_N=10 npm run dev
 
 1. 在 InputNumber 中输入金额（校验：1 ≤ amount ≤ balance，超限报错）
 2. 点击"开始取款"
-3. 后端执行：`BEGIN IMMEDIATE` 扣款 + 生成 N 个 (k_i, R_i) + INSERT session
+3. 后端执行：`runImmediateTx` 扣款 + 生成 N 个 (k_i, R_i) + INSERT session
 4. 进入 Step 2/4
 
 > **TTL 提示**：顶部出现 5 分钟倒计时（1Hz 刷新），过期前未完成则下次 init 自动退款。
@@ -191,12 +194,12 @@ BC_DEMO_N=10 npm run dev
    }
    ```
 2. 点击"复制 token"按钮复制到剪贴板
-3. 系统提示：将 token 粘贴给 merchant 在 `/payment` 页面完成兑付
+3. 系统提示：将 token 粘贴给收款方在 `/payment` 页面完成兑付
 
 ### 4.4 取消取款
 
 - 任意 step 中点击顶部"取消取款"按钮
-- 后端 `POST /api/withdraw/cancel` 执行：`BEGIN IMMEDIATE` 退款 + session 状态推进为 cancelled
+- 后端 `POST /api/withdraw/cancel` 执行：`runImmediateTx` 退款 + session 状态推进为 cancelled
 - 前端清空 blindersRef 并回到 Step 0
 
 ### 4.5 刷新 / 关闭页面的保护
@@ -211,7 +214,7 @@ BC_DEMO_N=10 npm run dev
 ### 5.1 注册
 
 1. 浏览器访问 http://localhost:5174/register
-2. 填写：用户名（如 `bob`）、密码（如 `pw123`）、角色选 **merchant**
+2. 填写：用户名（如 `bob`）、密码（如 `Pw12345!`）、角色选 **merchant**
 3. 登录后跳转 /dashboard，可见余额 0
 
 ### 5.2 收款（粘贴 token）
@@ -237,8 +240,8 @@ BC_DEMO_N=10 npm run dev
 2. POST /api/payment，后端 `processPayment` 执行：
    - formatGate（H1）：字符串级校验，拦截畸形 token
    - verifySig：再次曲线级验签（事务外）
-   - `BEGIN IMMEDIATE`：SELECT serial → 已存在则 409；否则 INSERT spent_coins + UPDATE merchant.balance
-3. 成功 → 商户余额 += amount，UI 显示绿色 ✓ 成功提示
+   - `runImmediateTx`：SELECT serial → 已存在则 409；否则 INSERT spent_coins + UPDATE 收款方 balance
+3. 成功 → 收款方余额 += amount，UI 显示绿色 ✓ 成功提示
 4. 失败 → UI 显示红色错误提示（见 §5.3）
 
 ### 5.3 收款错误码与提示
@@ -247,8 +250,8 @@ BC_DEMO_N=10 npm run dev
 |--------|--------|---------|------|
 | 400 | MALFORMED_TOKEN | "token 格式不合法" | 检查 JSON 字段是否完整 |
 | 400 | SIGNATURE_INVALID | "验签失败，token 已被篡改" | 联系付款人重新取款 |
-| 403 | FORBIDDEN | "仅商户可调用此接口" | 检查登录角色 |
-| 404 | MERCHANT_NOT_FOUND | "商户账号不存在" | 重新登录 |
+| 401 | UNAUTHORIZED | "请先登录" | 未登录或 token 过期 |
+| 404 | MERCHANT_NOT_FOUND | "收款账号不存在" | 重新登录 |
 | 409 | DOUBLE_SPEND | "双花已检测，token 已被消费" | 不可重复使用同一 token |
 
 ### 5.4 双花演示
@@ -257,10 +260,29 @@ BC_DEMO_N=10 npm run dev
 
 1. 点击该按钮
 2. 前端再次 POST /api/payment 同一 token
-3. 后端 `BEGIN IMMEDIATE`：SELECT serial → 已存在 → 409 DOUBLE_SPEND
+3. 后端 `runImmediateTx` 事务：SELECT serial → 已存在 → 409 DOUBLE_SPEND
 4. UI 显示红色"双花已检测"提示
 
-> **教学文案**：UI 顶部 Alert 显式说明"双花检测的时序不确定——并发提交时由 SQLite 写锁调度，不保证先发起者胜"。
+> **教学文案**：UI 顶部 Alert 显式说明"双花检测的时序不确定——并发提交时由 PostgreSQL 事务与 UNIQUE 约束调度，不保证先发起者胜"。
+
+### 5.5 担保托管收款（escrow，Phase 7）
+
+> 两阶段提交托管：商户创建收款单 → 顾客锁定 token → 顾客确认收货 → 商户入账；或商户退款。三方（商户 / 顾客 / 银行）在线协作。
+
+| 步骤 | 操作方 | API | 说明 |
+|------|--------|-----|------|
+| 1 | 商户 | POST /api/payment/escrow `{ amount }` | 创建收款单，状态 `created`，返回 `escrow_id` 与 `challenge` |
+| 2 | 顾客 | POST /api/payment/lock `{ escrow_id, challenge, serial, amount, R_prime, s_prime }` | 验签 + challenge 匹配后锁定 token，状态 `locked` |
+| 3 | 顾客 | POST /api/payment/confirm `{ escrow_id }` | 确认收货，资金转入商户账户，状态 `committed` |
+| 3' | 商户/顾客 | POST /api/payment/cancel `{ escrow_id }` | 撤销/退款，资金退还顾客，状态 `cancelled` |
+| — | 双方 | GET /api/payment/escrows · /escrow/:id | 查询在途与历史托管单 |
+
+**权限与防护**（对应 escrow.test.js 6 用例）：
+
+- 仅锁定该单的 `customer_id` 可 confirm；商户自身无法自证 confirm（防单方结算）
+- 截获 token + challenge 的中间人无法存入自己账户（challenge 绑定收款单）
+- 同一 token 无法同时锁定到两个收款单（一币多锁拦截）
+- token 一旦被锁定，老接口 POST /api/payment 无法再抢兑
 
 ---
 
@@ -288,7 +310,7 @@ BC_DEMO_N=10 npm run dev
 | 4 | 在 A 与 B 几乎同时点击"提交存款" | 一个 200 一个 409 |
 | 5 | 检查 A、B 余额 | 一个 balance=30，一个 balance=0 |
 
-> **时序说明**：SQLite `BEGIN IMMEDIATE` 写锁互斥，第二个请求阻塞等第一个 COMMIT 后再继续，必然检测到 serial 已存在返回 409。具体谁赢由 OS 调度决定，UI 文案显式说明"不保证先发起者胜"。
+> **时序说明**：PostgreSQL 事务 + `spent_coins.serial` UNIQUE 约束互斥，第二个请求的 INSERT 因唯一冲突返回 409。具体谁赢由数据库调度决定，UI 文案显式说明"不保证先发起者胜"。
 
 ### 6.3 截图占位
 
@@ -316,26 +338,27 @@ BC_DEMO_N=10 npm run dev
 
 - **antd 6** 设计系统：统一间距、圆角、字体、按钮样式
 - **原生 CSS / antd token**：自定义布局与主题微调（`index.css` + ConfigProvider theme token）
-- **role-gated 菜单**：customer 主菜单只见"取款"，merchant 主菜单只见"收款"，避免误操作
+- **导航菜单**：customer 与 merchant 共用完整菜单（dashboard / bank / wallet / withdraw / payment / history / privacy），角色解锁后页面互通
 - **状态色规范**：绿色 ✓ 成功、红色 ✗ 错误、橙色 ⏳ 倒计时
 
 ### 7.2 交互反馈
 
 | 反馈类型 | 实现 | 触发 |
 |----------|------|------|
-| 即时预验签 | useEffect + 300ms debounce | merchant 粘贴 token 后自动触发 |
+| 即时预验签 | useEffect + 300ms debounce | 收款方粘贴 token 后自动触发 |
 | 提交按钮联动 | 预验签未 ✓ 时禁用 | 防止无效 POST |
 | TTL 倒计时 | useState + 1Hz setInterval + 红色告警 | customer 取款向导顶部显示 |
 | 错误码映射 | mapApiError 函数覆盖所有错误码 | API 返回非 200 时友好中文提示 |
 | 取消按钮 | 顶部"取消取款"始终可见 | customer 任意 step 可取消 |
 | 双花重试 | "再次提交同 token"按钮 | 提交成功后出现 |
+| 余额实时刷新 | confirm/cancel 后调 GET /auth/me 同步 | 托管结算 / 退款后余额更新 |
 
 ### 7.3 安全提示
 
 | 提示 | 位置 | 目的 |
 |------|------|------|
 | beforeunload 警告 | Withdraw.jsx | 防止用户刷新丢失 α/β |
-| 角色守卫 403 提示 | 任意越权调用 | 防止 customer 调 /payment |
+| 管理接口 403 提示 | 非 admin 访问 /admin/* | 防止越权管理操作 |
 | 余额不足提示 | Withdraw InputNumber | 防止超额取款 |
 | 双花时序说明 Alert | Payment.jsx 顶部 | 教学澄清"不保证先发起者胜" |
 | 演示模式警告 | BC_DEMO_N=10 启动时 | 防止生产误用 |
@@ -357,7 +380,7 @@ A：α_j / β_j 是盲签协议的核心盲化因子，一旦泄露银行可将�
 
 ### Q2：为什么双花测试不假设先发起者胜？
 
-A：SQLite 写锁互斥的时序由 OS 调度决定，无法预测。本项目 UI 显式说明"不保证先发起者胜"。测试用 `Promise.all` + `.sort()` 检查结果集，不假设具体 200/409 归属。详见 [docs/TESTING.md §3](./TESTING.md)。
+A：PostgreSQL 事务与 UNIQUE 约束的并发时序由数据库调度决定，无法预测。本项目 UI 显式说明"不保证先发起者胜"。测试用 `Promise.all` + `.sort()` 检查结果集，不假设具体 200/409 归属。详见 [docs/TESTING.md §3](./TESTING.md)。
 
 ### Q3：演示模式 N=10 安全吗？
 
@@ -377,13 +400,13 @@ A：本项目提供 3 个实证测试（详见 [docs/TESTING.md §2](./TESTING.m
 
 ### Q6：如何重启服务保持密钥不变？
 
-A：`bankKeyService.getOrGenerate()` 启动时检查 `bank_keys` 表：
+A：`bankKeyService.getOrGenerate()` 启动时按面额检查 `bank_keys` 表：
 
-- 第一次启动：表为空 → 生成新密钥对 → INSERT singleton 行
+- 第一次启动：表为空 → 生成对应面额密钥对 → INSERT 行
 - 后续启动：表有行 → 直接读取 → **不重生成**
 
-这样重启不会使旧 token 失效。重启后控制台输出与上次相同的 `Bank public key` 即正确。
+这样重启不会使旧 token 失效。重启后控制台输出与上次相同的各面额 `Bank public key` 即正确。
 
 ### Q7：为什么不预置 admin 账号？
 
-A：本项目无 admin 角色——只有 customer 与 merchant 两类互斥角色。所有账号需通过 `/register` 自行注册。详见 [docs/REQUIREMENTS.md](./REQUIREMENTS.md) UC-1。
+A：本项目有 admin 角色（`CHECK(role IN ('customer','merchant','admin'))`），但 `/register` 仅允许 customer / merchant 两类互斥角色注册——admin 需数据库手动植入，用于访问 `/api/admin/audit`（审计查询）、`/api/admin/rotate-key`（密钥轮换）与 `/api/bank/reserve`（准备金查询）等管理接口。详见 [docs/REQUIREMENTS.md](./REQUIREMENTS.md)。

@@ -1,9 +1,8 @@
-# docker-compose.yml — Phase 5: 单服务部署（backend + volume）
+# docker-compose.yml — Phase 5: 双服务部署（postgres + backend）
 #
-# v5 §三 5.1 落地：
-#   - 单服务：backend express 同时托管 API + 前端 dist（不单独起 nginx）。
-#   - 数据持久化：volume 挂到 /app/backend/data，better-sqlite3 的 .db 文件
-#     写在这里，容器重建不丢数据。
+# v5 §三 5.1 落地（PG 迁移后更新）：
+#   - db 服务：PostgreSQL 16，数据存 named volume pgdata。
+#   - blindcash 服务：backend express 同时托管 API + 前端 dist（不单独起 nginx）。
 #   - 健康检查：curl /api/health，10s 间隔，3 次失败标 unhealthy。
 #   - BC_MASTER_KEY：生产必须从 secrets 注入；这里用 .env 或命令行覆盖。
 #
@@ -16,6 +15,27 @@
 # 密钥变了——所有已签发 token 失效。生产必须设固定的 32-byte hex。
 
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: blindcash_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=testpass
+      - POSTGRES_DB=blindcash
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    # 映射 5432 供本地 `npm run dev`（非容器）直连；backend 容器走内部
+    # 网络 db:5432，不依赖这个映射。若宿主机已占用 5432 请改左端口。
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d blindcash"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   blindcash:
     build:
       context: .
@@ -23,18 +43,20 @@ services:
     image: blindcash:latest
     container_name: blindcash
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "4100:4100"
     environment:
       - NODE_ENV=production
       - PORT=4100
-      - BC_DB_PATH=/app/backend/data/blindcash.db
+      - DATABASE_URL=postgres://postgres:testpass@db:5432/blindcash
+      - PG_SSL=disable
       # BC_MASTER_KEY: 32-byte hex string (64 chars). 生产必须设。
       # 示例：BC_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       - BC_MASTER_KEY=${BC_MASTER_KEY:-}
       - BC_LOG_LEVEL=info
-    volumes:
-      - blindcash_data:/app/backend/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -43,4 +65,4 @@ services:
       start_period: 15s
 
 volumes:
-  blindcash_data:
+  pgdata:

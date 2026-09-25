@@ -4,7 +4,7 @@
 #   - m5 修正：后端是 ESM（package.json "type": "module"），**无 build 步骤**，
 #     直接 node backend/src/app.js 运行。计划里写的 "CommonJS" 是笔误——
 #     实际 package.json 是 ESM。
-#   - better-sqlite3 是 native 模块，build stage 需要 python3 make g++ 编译。
+#   - bcrypt 是 native 模块，build stage 需要 python3 make g++ 编译。
 #   - vite alias @crypto 指向 ../backend/src/crypto，所以 backend/src 必须
 #     在 build frontend 前已拷入镜像。
 #   - 前端由 backend express.static 托管（不单独起 nginx）。
@@ -17,12 +17,12 @@ FROM node:22-bookworm AS builder
 
 WORKDIR /app
 
-# better-sqlite3 + bcrypt native 编译依赖
+# bcrypt native 编译依赖（pg 是纯 JS，无编译需求）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-# 先装后端依赖（better-sqlite3/bcrypt 编译）
+# 先装后端依赖（bcrypt 编译）
 COPY backend/package*.json ./backend/
 RUN cd backend && npm ci
 
@@ -53,12 +53,9 @@ COPY --from=builder /app/backend/src ./backend/src
 COPY --from=builder /app/frontend/dist ./frontend/dist
 COPY --from=builder /app/docs ./docs
 
-# 数据持久化目录（docker-compose 挂 volume 到这里）
-RUN mkdir -p /app/backend/data
-
 ENV NODE_ENV=production
 ENV PORT=4100
-ENV BC_DB_PATH=/app/backend/data/blindcash.db
+# DATABASE_URL 由 docker-compose 注入（连接 db 服务的 PostgreSQL）。
 
 EXPOSE 4100
 

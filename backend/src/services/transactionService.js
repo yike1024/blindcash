@@ -23,13 +23,13 @@ import { getDb } from '../models/db.js';
 /**
  * 在调用方事务内写一条流水。MUST be called inside runImmediateTx((db) => ...).
  *
- * @param {import('better-sqlite3').Database} db        调用方事务的 db 句柄
+ * @param {object} db — 调用方事务的 db 句柄
  * @param {{user_id:number, kind:string, amount:number,
  *          counterparty?:string|null, serial?:Uint8Array|null,
  *          session_id?:string|null, note?:string}} args
- * @returns {number} insert row id
+ * @returns {Promise<number>} insert row id
  */
-export function recordTransaction(db, {
+export async function recordTransaction(db, {
   user_id, kind, amount,
   counterparty = null, serial = null, session_id = null, note = null,
 }) {
@@ -43,7 +43,7 @@ export function recordTransaction(db, {
     throw new Error('recordTransaction: amount must be a positive integer');
   }
   const serialBuf = serial ? Buffer.from(serial) : null;
-  const result = db.prepare(
+  const result = await db.prepare(
     `INSERT INTO transactions
        (user_id, kind, amount, counterparty, serial, session_id, note)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -53,28 +53,21 @@ export function recordTransaction(db, {
 
 /**
  * 查询用户的账本流水（最新 limit 条，倒序）。
- * 独立只读查询，不在事务内。
- *
- * @param {number} userId
- * @param {number} [limit=50] 最多返回多少条
- * @returns {Array<{id:number, user_id:number, kind:string, amount:number,
- *           counterparty:string|null, serial:Uint8Array|null,
- *           session_id:string|null, note:string|null, created_at:string}>}
+ * @returns {Promise<Array>}
  */
-export function listTransactions(userId, limit = 50) {
+export async function listTransactions(userId, limit = 50) {
   if (!Number.isInteger(userId) || userId <= 0) {
     throw new Error('listTransactions: userId must be a positive integer');
   }
   const cap = Math.min(Math.max(1, Number(limit) || 50), 200);
   const db = getDb();
-  const rows = db.prepare(
+  const rows = await db.prepare(
     `SELECT id, user_id, kind, amount, counterparty, serial, session_id, note, created_at
        FROM transactions
       WHERE user_id = ?
       ORDER BY created_at DESC, id DESC
       LIMIT ?`,
   ).all(userId, cap);
-  // serial 列以 Buffer 形式回来，转成 Uint8Array 以保持一致性
   return rows.map((r) => ({
     ...r,
     serial: r.serial ? new Uint8Array(r.serial) : null,

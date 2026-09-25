@@ -6,9 +6,12 @@ node_modules/
 frontend/dist/
 frontend/dist-ssr/
 
-# 后端数据（SQLite，含 -wal/-shm）
+# 后端数据（历史 SQLite 残留；PostgreSQL 由 docker volume 持久化）
 backend/data/*.db
 backend/data/*.db-*
+
+# Docker compose 的 PG 数据卷（postgres:16-alpine）
+db/data/
 
 # 本地工具
 cloudflared.exe

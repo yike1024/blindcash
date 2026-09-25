@@ -1,9 +1,9 @@
 // tests/setup.js — shared test utilities (M2 crypto tests)
 //
 // No DB is touched by M2 tests (these are pure crypto unit tests, so the
-// fileParallelism:false + BC_DB_PATH isolation machinery from M1 is not
-// invoked here). This file just exposes a couple of byte/hex/random helpers
-// that the crypto test files reuse.
+// fileParallelism:false + shared PostgreSQL resetDb() isolation machinery
+// from M1 is not invoked here). This file just exposes a couple of
+// byte/hex/random helpers that the crypto test files reuse.
 //
 // We DELIBERATELY do NOT import from src/utils/hex.js — the tests need to
 // be a faithful re-derivation of the encoding, not a tautological re-import

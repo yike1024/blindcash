@@ -21,7 +21,7 @@ import { bytesToHex, randomBytes } from './setup.js';
 
 describe('M2 · blinding.js — client-side blinding primitives', () => {
   describe('generateBlinders', () => {
-    it('returns α, β as bigints in [1, n-1]', () => {
+    it('returns α, β as bigints in [1, n-1]', async () => {
       const { alpha, beta } = generateBlinders();
       expect(typeof alpha).toBe('bigint');
       expect(typeof beta).toBe('bigint');
@@ -31,7 +31,7 @@ describe('M2 · blinding.js — client-side blinding primitives', () => {
       expect(beta < n).toBe(true);
     });
 
-    it('exposes α, β as 32-byte big-endian Uint8Arrays', () => {
+    it('exposes α, β as 32-byte big-endian Uint8Arrays', async () => {
       const { alphaBytes, betaBytes } = generateBlinders();
       expect(alphaBytes.length).toBe(32);
       expect(betaBytes.length).toBe(32);
@@ -40,14 +40,14 @@ describe('M2 · blinding.js — client-side blinding primitives', () => {
       // (different draw — just sanity-check the format invariant)
     });
 
-    it('two consecutive draws produce different (α, β) pairs', () => {
+    it('two consecutive draws produce different (α, β) pairs', async () => {
       const a = generateBlinders();
       const b = generateBlinders();
       // Probability of collision ≈ 2^-128; assertion is effectively deterministic
       expect(a.alpha === b.alpha && a.beta === b.beta).toBe(false);
     });
 
-    it('1000 draws all land in [1, n-1] (range bound over many trials)', () => {
+    it('1000 draws all land in [1, n-1] (range bound over many trials)', async () => {
       for (let i = 0; i < 1000; i++) {
         const { alpha, beta } = generateBlinders();
         expect(alpha >= 1n && alpha < n).toBe(true);
@@ -57,14 +57,10 @@ describe('M2 · blinding.js — client-side blinding primitives', () => {
   });
 
   describe('computeBlindedCommitment', () => {
-    it('R\' = R + α·G + β·P (matches manual recompute via noble Point)', () => {
+    it('R\' = R + α·G + β·P (matches manual recompute via noble Point)', async () => {
       const kp = generateKeyPair();
-      const k = (function () {
-        // pick a valid k in [1, n-1] without depending on curve.randomScalar
-        let s = BigInt('0x' + bytesToHex(randomBytes(32))) % (n - 1n);
-        s = s + 1n;
-        return s;
-      })();
+      // pick a valid k in [1, n-1] without depending on curve.randomScalar
+      let k = BigInt('0x' + bytesToHex(randomBytes(32))) % (n - 1n) + 1n;
       const { RBytes } = bankStep1(k);
       const { alpha, beta } = generateBlinders();
 
@@ -80,7 +76,7 @@ describe('M2 · blinding.js — client-side blinding primitives', () => {
       expect(bytesToHex(RPrimeActual)).toBe(bytesToHex(expected));
     });
 
-    it('two independent (α, β) draws over the same R yield different R\'', () => {
+    it('two independent (α, β) draws over the same R yield different R\'', async () => {
       const kp = generateKeyPair();
       const k = BigInt('0x' + bytesToHex(randomBytes(32))) % (n - 1n) + 1n;
       const { RBytes } = bankStep1(k);
@@ -91,7 +87,7 @@ describe('M2 · blinding.js — client-side blinding primitives', () => {
   });
 
   describe('unblindResponse', () => {
-    it('s\' = (s + α) mod n', () => {
+    it('s\' = (s + α) mod n', async () => {
       const s = BigInt('0x' + bytesToHex(randomBytes(32))) % n;
       const alpha = BigInt('0x' + bytesToHex(randomBytes(32))) % (n - 1n) + 1n;
       const sPrime = unblindResponse(s, alpha);
@@ -99,7 +95,7 @@ describe('M2 · blinding.js — client-side blinding primitives', () => {
       expect(sPrime >= 0n && sPrime < n).toBe(true);
     });
 
-    it('wraps around correctly when s + α ≥ n', () => {
+    it('wraps around correctly when s + α ≥ n', async () => {
       // pick s, alpha such that their sum exceeds n
       const s = n - 1n;
       const alpha = 5n;

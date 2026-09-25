@@ -10,7 +10,9 @@
 import { Router } from 'express';
 import { body, validationResult } from 'express-validator';
 import { hashPassword, verifyPassword, generateToken } from '../services/authService.js';
-import { createUser, getUserByUsername, usernameExists } from '../services/userService.js';
+import { createUser, getUserByUsername, getUserById, usernameExists } from '../services/userService.js';
+import { authenticateJWT } from '../middleware/auth.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
@@ -50,7 +52,7 @@ router.post(
     const { username, password, role } = req.body;
 
     // Username uniqueness check (also enforced by DB UNIQUE constraint as a safety net)
-    if (usernameExists(username)) {
+    if (await usernameExists(username)) {
       return res.status(409).json({
         error: 'USERNAME_TAKEN',
         message: `username '${username}' is already taken`,
@@ -60,7 +62,7 @@ router.post(
     try {
       // Hash the password BEFORE persisting (bcrypt rounds=12)
       const passwordHash = await hashPassword(password);
-      const user = createUser(username, passwordHash, role);
+      const user = await createUser(username, passwordHash, role);
 
       // Issue JWT immediately so the front-end is authenticated
       const token = generateToken(user);
@@ -77,10 +79,11 @@ router.post(
       });
     } catch (e) {
       // Catch any DB-level UNIQUE violation (race condition)
-      if (e.message && e.message.includes('UNIQUE')) {
+      if (e.code === '23505' || (e.message && e.message.includes('UNIQUE'))) {
         return res.status(409).json({ error: 'USERNAME_TAKEN', message: `username '${username}' is already taken` });
       }
-      return res.status(500).json({ error: 'INTERNAL_ERROR', message: e.message });
+      logger.error({ err: e.message, stack: e.stack }, 'register route unexpected error');
+      return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
     }
   },
 );
@@ -99,7 +102,7 @@ router.post(
     }
 
     const { username, password } = req.body;
-    const user = getUserByUsername(username);
+    const user = await getUserByUsername(username);
 
     if (!user) {
       // Generic message to avoid username enumeration (security best practice)
@@ -118,5 +121,25 @@ router.post(
     });
   },
 );
+
+/**
+ * GET /api/auth/me
+ * 返回当前登录用户的最新信息（含实时余额）。
+ * 前端在 escrow confirm/cancel 后调用以刷新余额。
+ */
+router.get('/me', authenticateJWT, async (req, res) => {
+  try {
+    const user = await getUserById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'User not found' });
+    }
+    return res.json({
+      user: { id: user.id, username: user.username, role: user.role, balance: user.balance },
+    });
+  } catch (err) {
+    logger.error({ msg: 'auth/me error', err: err.message });
+    return res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
 
 export default router;

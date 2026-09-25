@@ -1,13 +1,13 @@
 # BlindCash 测试文档（TESTING）
 
-> 内容：207 用例分类表 + 盲性证据 + 双花演示 + 测试环境
+> 内容：213 用例分类表 + 盲性证据 + 双花演示 + 测试环境
 > 关联：[REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN.md](./DESIGN.md) | [IMPLEMENTATION.md](./IMPLEMENTATION.md) | [ISOLATION.md](../ISOLATION.md)
 
 ---
 
-## 1. 测试用例分类总表（207 例）
+## 1. 测试用例分类总表（213 例）
 
-> 18 个测试文件，共 207 个 `it` / `test` 用例。Phase 1 起陆续新增 `bank.test.js`、`bankReserveService.test.js`、`auditService.test.js`、`migrationRunner.test.js`、`transactions.test.js`、`multiDenomination.test.js`、`redeemSplit.test.js`、`privacy.test.js`、`admin.test.js`、`rateLimit.test.js`，使总数从 M7 的 104 增至 207。
+> 19 个测试文件，共 213 个 `it` / `test` 用例。Phase 1 起陆续新增 `bank.test.js`、`bankReserveService.test.js`、`auditService.test.js`、`migrationRunner.test.js`、`transactions.test.js`、`multiDenomination.test.js`、`redeemSplit.test.js`、`privacy.test.js`、`admin.test.js`、`rateLimit.test.js`、`escrow.test.js`，使总数从 M7 的 104 增至 213。
 
 ### 1.1 按里程碑与文件分布
 
@@ -17,11 +17,11 @@
 | `blinding.test.js` | M2 | 9 | generateBlinders / computeBlindedCommitment / unblindResponse 客户端原语 |
 | `cutAndChoose.test.js` | M2 | 18 | verifyRevealed 单候选 + verifyAllRevealed + pickRandomJ 分布 + N=10 作弊场景 + **1000-trial 盲性证据** |
 | `clientBuild.test.js` | M2 | 4 | vite build 0 errors + happy-dom 浏览器可跑性 |
-| `bankKeyService.test.js` | M3 | 20 | 单行 singleton + 第二次启动读取同密钥 + 公钥格式 + `/api/bank/pubkey` 端点 + 多面额密钥 |
+| `bankKeyService.test.js` | M3 | 20 | 密钥生成/持久化/轮换 + 多面额密钥 + 公钥格式 + `/api/bank/pubkey` 端点 |
 | `withdrawal.test.js` | M4 | 19 | 4-move happy path + 校验 + **教授 3 必测**（α/β 不离开设备、session 唯一性、过期懒清理）+ cancel |
-| `payment.test.js` | M5 | 13 | happy path + H3 双花 vs 重试 + H1 畸形 token + 篡改金额 + 角色守卫 + 初始余额 |
+| `payment.test.js` | M5 | 13 | happy path + H3 双花 vs 重试 + H1 畸形 token + 篡改金额 + 角色解锁 + 初始余额 |
 | `integration.test.js` | M7 | 10 | 全栈 E2E + 跨用户拒绝 + 并发双花 + 过期懒清理 + 配置 sanity |
-| `transactions.test.js` | M7 | 8 | 账本流水 + 角色解锁闭环（customer 存款 / merchant 取款）|
+| `transactions.test.js` | M7 | 8 | 账本流水 + 角色解锁闭环 |
 | `bank.test.js` | Phase 1 | 19 | deposit service + `/api/bank/deposit` + `/api/bank/redeem` 路由 + 双花 |
 | `bankReserveService.test.js` | Phase 1 | 7 | assertInvariant 正常 / 破坏 / 回滚 / in-flight |
 | `auditService.test.js` | Phase 3 | 4 | 审计日志写入 + 查询 |
@@ -31,7 +31,8 @@
 | `multiDenomination.test.js` | Phase 6 | 11 | 多面额签发 + 面额匹配 + 密钥版本 |
 | `redeemSplit.test.js` | Phase 6 | 15 | 找零拆分 + 面额整除 + 双花 + 审计 |
 | `privacy.test.js` | Phase 6 | 16 | 匿名集分析 + 面额/密钥版本不可区分性 |
-| **合计** | | **207** | |
+| `escrow.test.js` | Phase 7 | 6 | 担保托管两阶段提交：lock/confirm/cancel + 权限防线 + 防中间人抢兑 + 一币多锁拦截 |
+| **合计** | | **213** | |
 
 ### 1.2 按测试类型分布
 
@@ -44,7 +45,7 @@
 | **作弊概率** | 2 | `over 1000 trials with N=10, cheat-success rate ≤ [50, 200]/1000`、`single-cheat attempt fails with high probability` |
 | **格式校验（H1）** | 4 | serial 63 hex → 400、R' 前缀 04 → 400、s' 63 hex → 400、amount=0 → 400 |
 | **双花检测（H3）** | 4 | 同商户重试 → 409、双商户并发同 token → 200+409、token_hash 大小写归一化 |
-| **角色守卫** | 6 | customer 调 /payment → 403、merchant 调 /withdraw → 403、未登录调任意 → 401 |
+| **鉴权与角色隔离** | 6 | 未登录调任意 → 401、非 admin 调 /admin/audit → 403、他人 session → 404 |
 | **跨用户访问** | 4 | A 用户的 session B 用户不能 reveal、A 的 token 不能被 B 兑付 |
 | **构建可跑性** | 4 | vite build 0 errors、client/* 在 happy-dom 下能调用 |
 | **配置 sanity** | 2 | CUT_AND_CHOOSE_N 默认 100 / BC_DEMO_N=10 生效、SESSION_TTL_MS 默认 5min |
@@ -186,7 +187,7 @@ $$
 4. **可选：双商户双标签页并发**
    - 标签页 3：注册第二个商户 `carol`，进入 /payment 粘贴同 token
    - 在标签页 2 与标签页 3 几乎同时点"提交"
-   - 由于 SQLite BEGIN IMMEDIATE 写锁互斥，必然一个 200 一个 409；UI 文案显式说明"不保证先发起者胜"
+   - 由于 PostgreSQL 事务 + `spent_coins.serial` UNIQUE 约束互斥，必然一个 200 一个 409；UI 文案显式说明"不保证先发起者胜"
 
 ### 3.3 截图占位
 
@@ -222,14 +223,14 @@ $$
 | 项 | 值 |
 |----|-----|
 | OS | Windows 11 |
-| Node | 24.x（`engines.node` ≥ 24） |
+| Node | ≥ 22（`engines.node` ≥ 22） |
 | 测试框架 | vitest 4.1.11 + happy-dom 20.14.5 + supertest 7.2.2 |
-| 数据库 | better-sqlite3 11.7.0（in-memory 测试模式） |
-| 并发模式 | `fileParallelism: false`（避免 SQLite 文件锁竞争） |
+| 数据库 | PostgreSQL 14+ + `pg` 8.x（测试需提供 `DATABASE_URL`） |
+| 并发模式 | vitest 串行执行数据库测试，避免事务交叉 |
 
 ### 4.2 测试隔离机制
 
-- 每个 M3+ 测试用例运行前由 `setup.js` 设置 `BC_DB_PATH=:memory:`，确保每个测试文件用独立内存数据库
+- 所有测试共享一个 PostgreSQL 测试数据库（`DATABASE_URL`），每个测试文件在 `beforeAll` 调用 `resetTestDb()`（`resetDb()`）清空 `public` schema 并重新运行 migrations，确保干净状态
 - M2 纯密码学测试不触碰 DB，不受隔离机制影响
 - `integration.test.js` 用 `http.createServer(app)` + 随机端口启动真实 HTTP server，避免 supertest 在 Windows 上的 ENOBUFS 端口耗尽问题
 - 概率测试（盲性证据、作弊概率）单独标 `timeout: 60000`，避免 vitest 默认 5s 超时
@@ -238,7 +239,7 @@ $$
 ### 4.3 运行命令
 
 ```bash
-# 全量测试（207 用例）
+# 全量测试（213 用例）
 npm test
 
 # 监听模式
@@ -259,15 +260,24 @@ npx vitest run integration.test.js
  ✓  9 tests passed (blinding)
  ✓ 18 tests passed (cutAndChoose)
  ✓  4 tests passed (clientBuild)
- ✓ 12 tests passed (bankKeyService)
+ ✓ 20 tests passed (bankKeyService)
  ✓ 19 tests passed (withdrawal)
  ✓ 13 tests passed (payment)
  ✓ 10 tests passed (integration)
+ ✓  8 tests passed (transactions)
  ✓ 19 tests passed (bank)
  ✓  7 tests passed (bankReserveService)
+ ✓  4 tests passed (auditService)
+ ✓  5 tests passed (admin)
+ ✓  5 tests passed (migrationRunner)
+ ✓  5 tests passed (rateLimit)
+ ✓ 11 tests passed (multiDenomination)
+ ✓ 15 tests passed (redeemSplit)
+ ✓ 16 tests passed (privacy)
+ ✓  6 tests passed (escrow)
 
- Test Files  18 passed (18)
-      Tests  207 passed (207)
+ Test Files  19 passed (19)
+      Tests  213 passed (213)
 ```
 
 ### 4.5 已知噪声
@@ -320,7 +330,7 @@ npx vitest run integration.test.js
 ✓ M4: 4-move happy path — full init/submit/reveal/cancel lifecycle
 ✓ M4: validation — amount ≤ 0 → 400
 ✓ M4: validation — amount > balance → 400
-✓ M4: validation — non-customer cannot init → 403
+✓ M4: role unlock — merchant calls init → 201（任何登录用户都能取款）
 ✓ M4: [必测#1] blindness invariant 3 — submit payload carries α_j → 400
 ✓ M4: [必测#1] blindness invariant 3 — reveal payload carries α_j for wrong index → 400
 ✓ M4: [必测#1] blindness invariant 3 — α_j not in any DB row after commit
@@ -338,10 +348,10 @@ npx vitest run integration.test.js
 ```
 ✓ M7 · full end-to-end — register customer → withdraw 30 → merchant deposit → balance +30
 ✓ M7 · full end-to-end — customer balance decremented by withdraw, refunded on cancel
-✓ M7 · cross-user — A's session cannot be revealed by B (403)
+✓ M7 · cross-user — A's session cannot be revealed by B (404)
 ✓ M7 · cross-user — A's token cannot be deposited to merchant who is not the payee
-✓ M7 · cross-user — customer cannot call /payment (403)
-✓ M7 · cross-user — merchant cannot call /withdraw (403)
+✓ M7 · role unlock — merchant can call /withdraw/init → 201
+✓ M7 · role unlock — customer can call /payment → 400 SIGNATURE_INVALID（token 无效仍被拒）
 ✓ M7 · concurrent double-spend — Promise.all two merchants same token → 200+409
 ✓ M7 · expired session lazy-cleanup — refund on next init
 ✓ M7 · expired session lazy-cleanup — refund on next submit
@@ -355,7 +365,7 @@ npx vitest run integration.test.js
 ### 7.1 限流专项测试（rateLimit.test.js，5 用例）
 
 主测试套件的限流器都 `skip: () => isTest`（NODE_ENV=test 时 no-op），**不打死
-自己的 168 个测试**。但限流逻辑本身需要专项验证——否则 skip 让限流在主套件里
+自己的 213 个测试**。但限流逻辑本身需要专项验证——否则 skip 让限流在主套件里
 隐形等于没验证。rateLimit.test.js 手动构造不复用 skip 的 limiter 实例：
 
 | 用例 | 验证点 |

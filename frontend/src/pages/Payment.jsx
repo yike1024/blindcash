@@ -17,12 +17,15 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Input, Alert, Button, Space, Typography, Descriptions, Tag,
   message, Result, Spin, Collapse, Radio, Select, Upload, Badge,
+  Card, Form, InputNumber, Modal, Divider,
 } from 'antd';
 import {
   CheckCircleTwoTone, CloseCircleTwoTone, CopyOutlined, ThunderboltOutlined,
   ScanOutlined, WalletOutlined, ReloadOutlined, ClockCircleOutlined,
+  SafetyCertificateOutlined, QrcodeOutlined,
 } from '@ant-design/icons';
 import jsQR from 'jsqr';
+import QRCode from 'qrcode';
 
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
@@ -102,6 +105,84 @@ export default function PaymentPage() {
   const [selectedSerial, setSelectedSerial] = useState(null);
   const [pendingPays, setPendingPays] = useState([]);
   const [retryingId, setRetryingId] = useState(null);
+
+  // ── 商户担保收款单状态 ──
+  const [escrowAmount, setEscrowAmount] = useState(10);
+  const [escrowTtl, setEscrowTtl] = useState(300);
+  const [creatingEscrow, setCreatingEscrow] = useState(false);
+  const [createdEscrow, setCreatedEscrow] = useState(null);
+  const [escrowQrUrl, setEscrowQrUrl] = useState('');
+  const [myEscrows, setMyEscrows] = useState([]);
+  const [loadingEscrows, setLoadingEscrows] = useState(false);
+
+  const fetchMyEscrows = useCallback(async () => {
+    if (user?.role !== 'merchant') return;
+    setLoadingEscrows(true);
+    try {
+      const { data } = await api.get('/payment/escrows');
+      setMyEscrows(data.escrows || []);
+    } catch {
+      // 容错处理
+    } finally {
+      setLoadingEscrows(false);
+    }
+    // 同步刷新账户余额：顾客 confirm 后后端已给商户入账，
+    // 但 AuthContext 里缓存的 balance 是旧值，需要重新拉取。
+    try {
+      const { data: me } = await api.get('/auth/me');
+      if (me?.user) updateUser({ balance: me.user.balance });
+    } catch {
+      // 容错处理
+    }
+  }, [user?.role, updateUser]);
+
+  useEffect(() => {
+    fetchMyEscrows();
+  }, [fetchMyEscrows]);
+
+  const handleCreateEscrow = async () => {
+    setCreatingEscrow(true);
+    try {
+      const { data } = await api.post('/payment/escrow', {
+        amount: escrowAmount,
+        denomination: escrowAmount,
+        ttl_seconds: escrowTtl,
+      });
+      setCreatedEscrow(data);
+      message.success('担保收款单创建成功');
+      fetchMyEscrows();
+      // 生成包含 escrow_id 与 challenge 的快捷二维码
+      try {
+        const qrContent = JSON.stringify({
+          type: 'blindcash_escrow',
+          escrow_id: data.escrow_id,
+          challenge: data.challenge,
+          amount: data.amount,
+        });
+        const url = await QRCode.toDataURL(qrContent, { margin: 2, width: 220 });
+        setEscrowQrUrl(url);
+      } catch (err) {
+        console.error('生成收款二维码失败', err);
+      }
+    } catch (err) {
+      message.error(err?.response?.data?.message || '创建收款单失败');
+    } finally {
+      setCreatingEscrow(false);
+    }
+  };
+
+  const handleMerchantCancelEscrow = async (escrowId) => {
+    try {
+      await api.post('/payment/cancel', { escrow_id: escrowId });
+      message.success('收款单已撤销/退款');
+      // 重新获取当前用户最新余额
+      const { data: me } = await api.get('/auth/me');
+      if (me?.user) updateUser({ balance: me.user.balance });
+      fetchMyEscrows();
+    } catch (err) {
+      message.error(err?.response?.data?.message || '撤销失败');
+    }
+  };
 
   // Load bank public keys for local pre-verify.
   // Phase 6.1 多面额密钥：fetch /bank/pubkeys (plural) 拿到所有面额的
@@ -539,16 +620,16 @@ export default function PaymentPage() {
       <section className="bc-card bc-rise-2" style={{ padding: 28, marginBottom: 24 }}>
         <h2 className="bc-display" style={{ fontSize: 22, marginBottom: 4 }}>Chaum 盲签名付款流程</h2>
         <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 18 }}>
-          D. Chaum 1982 · 离线电子现金
+          D. Chaum 1982 · 离线电子现金 & 担保托管协议
         </p>
         <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, flexWrap: 'wrap', marginBottom: 16 }}>
           {[
             { num: '❶', who: '顾客', act: '取款', detail: '银行盲签名\n4-move 切换校验', color: 'gold' },
-            { num: '❷', who: '→ 商户', act: '出示 token', detail: 'QR 码离线交付\n银行不参与', color: 'cyan' },
-            { num: '❸', who: '商户', act: '扫码/粘贴', detail: '本地预验签\ns\'·G ?= R\'+e\'·P', color: 'emerald' },
-            { num: '❹', who: '→ 银行', act: '验签', detail: 'Schnorr 盲签名\n真实性校验', color: 'gold' },
-            { num: '❺', who: '银行', act: '双花检测', detail: 'serial 查\nspent_coins 表', color: 'crimson' },
-            { num: '❻', who: '商户', act: '余额+', detail: '存款入账\nnew_balance', color: 'emerald' },
+            { num: '❷', who: '商户', act: '开收款单', detail: '生成 Challenge\n随机数与有效期', color: 'cyan' },
+            { num: '❸', who: '顾客', act: '锁定 Token', detail: '两阶段占位\n防截获盗兑', color: 'emerald' },
+            { num: '❹', who: '顾客', act: '确认收货', detail: '仅顾客本人权限\n放款结算至商户', color: 'gold' },
+            { num: '❺', who: '银行', act: '双花与状态', detail: 'serial 查 spent_coins\n准备金严格守恒', color: 'crimson' },
+            { num: '❻', who: '商户/顾客', act: '结算或退款', detail: 'confirm入账商户\ncancel退还顾客', color: 'emerald' },
           ].map((s, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', flex: '1 1 0', minWidth: 140 }}>
               <div style={{
@@ -568,15 +649,119 @@ export default function PaymentPage() {
         <Alert
           type="info"
           showIcon
-          message="银行不参与付款过程（离线支付）"
+          message="防盗用与防抵赖：商户挑战-响应 + 在线担保托管"
           description={
             <span style={{ fontSize: 13 }}>
-              顾客将 token 交给商户是<b>离线</b>的——银行不在中间。银行只在商户存款时验签（步骤❹）+ 查双花（步骤❺）。
-              盲签名保证银行<b>无法</b>将取款（步骤❶）与存款（步骤❹）关联——这是 Chaum 式匿名性的核心。
+              传统 Chaum eCash 依赖纯离线持有者模型，存在网络嗅探盗用与履约抵赖风险。本系统引入<b>商户挑战码（Challenge）</b>将支付与交易单唯一绑定，并采用<b>两阶段托管（Lock → Confirm/Cancel）</b>实现原子履约。
             </span>
           }
         />
       </section>
+
+      {/* ── 商户专属：担保收款单管理 ── */}
+      {isMerchant && (
+        <section className="bc-card bc-rise-2" style={{ padding: 28, marginBottom: 24, border: '1px solid var(--emerald-500)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div>
+              <h2 className="bc-display" style={{ fontSize: 22, margin: 0 }}>
+                <SafetyCertificateOutlined style={{ color: 'var(--emerald-400)', marginRight: 8 }} />
+                发起担保收款单（挑战-响应防盗用）
+              </h2>
+              <p className="bc-mono" style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 4, marginBottom: 0 }}>
+                Two-Phase Escrow · Merchant Challenge-Response
+              </p>
+            </div>
+            <Button onClick={fetchMyEscrows} loading={loadingEscrows} icon={<ReloadOutlined />}>
+              刷新单据
+            </Button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            <div style={{ flex: '1 1 320px', minWidth: 280 }}>
+              <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 16 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>收款金额 (BC)</div>
+                  <InputNumber min={1} value={escrowAmount} onChange={(v) => setEscrowAmount(v || 1)} style={{ width: 140 }} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>有效时间 (秒)</div>
+                  <InputNumber min={30} max={86400} value={escrowTtl} onChange={(v) => setEscrowTtl(v || 300)} style={{ width: 140 }} />
+                </div>
+                <div style={{ alignSelf: 'flex-end' }}>
+                  <Button type="primary" onClick={handleCreateEscrow} loading={creatingEscrow} style={{ background: 'var(--emerald-500)', borderColor: 'var(--emerald-500)' }}>
+                    生成收款单
+                  </Button>
+                </div>
+              </div>
+
+              {createdEscrow && (
+                <Alert
+                  type="success"
+                  message="当前有效收款单"
+                  description={
+                    <div style={{ marginTop: 8 }}>
+                      <div><b>单号 ID：</b> <Text code copyable>{createdEscrow.escrow_id}</Text></div>
+                      <div style={{ marginTop: 4 }}><b>金额：</b> <Text strong style={{ color: 'var(--gold-400)' }}>{createdEscrow.amount} BC</Text></div>
+                      <div style={{ marginTop: 4 }}><b>挑战码 (Challenge)：</b></div>
+                      <Paragraph copyable style={{ fontSize: 11, fontFamily: 'monospace', wordBreak: 'break-all', marginBottom: 6 }}>
+                        {createdEscrow.challenge}
+                      </Paragraph>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        将此挑战码或下方二维码展示给顾客，顾客在钱包中绑定此单号锁定支付。
+                      </Text>
+                    </div>
+                  }
+                  style={{ marginBottom: 16 }}
+                />
+              )}
+            </div>
+
+            {escrowQrUrl && (
+              <div style={{ textAlign: 'center', border: '1px solid var(--border)', borderRadius: 8, padding: 14, background: '#fff' }}>
+                <img src={escrowQrUrl} alt="escrow qr" style={{ width: 180, height: 180 }} />
+                <div style={{ color: '#333', fontSize: 12, marginTop: 6, fontWeight: 600 }}>扫码绑定收款单</div>
+              </div>
+            )}
+          </div>
+
+          <Divider style={{ margin: '20px 0' }} />
+
+          <h3 style={{ fontSize: 16, marginBottom: 12 }}>我创建的收款单</h3>
+          {myEscrows.length === 0 ? (
+            <Text type="secondary">暂无收款单记录</Text>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {myEscrows.slice(0, 5).map((e) => (
+                <div key={e.id} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                  <div>
+                    <Space>
+                      <Text strong>{e.amount} BC</Text>
+                      <Tag color={
+                        e.status === 'created' ? 'blue' :
+                        e.status === 'locked' ? 'orange' :
+                        e.status === 'committed' ? 'green' : 'default'
+                      }>
+                        {e.status.toUpperCase()}
+                      </Tag>
+                      <Text type="secondary" style={{ fontSize: 11 }}>ID: {e.id.slice(0, 8)}…</Text>
+                    </Space>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                      到期：{new Date(e.expires_at).toLocaleTimeString()} · 顾客：{e.customer_name ? `@${e.customer_name}` : '未锁定'}
+                    </div>
+                  </div>
+                  <div>
+                    {['created', 'locked'].includes(e.status) && (
+                      <Button size="small" danger onClick={() => handleMerchantCancelEscrow(e.id)}>
+                        {e.status === 'locked' ? '退还顾客' : '撤销收款单'}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ── 输入 token ── */}
       <section className="bc-card bc-rise-3" style={{ padding: 28, marginBottom: 24 }}>

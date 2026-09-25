@@ -30,7 +30,7 @@ import rateLimit from 'express-rate-limit';
 // 测试用固定 key 生成器——隔离 ipKeyGenerator 在 Node http server 下
 // 可能返回不同值的问题。生产用 ipKeyGenerator，测试只验证限流逻辑本身。
 const FIXED_KEY = 'test-ip-key';
-function makeAuthLimiter() {
+async function makeAuthLimiter () {
   return rateLimit({
     windowMs: 60_000,
     max: 5,
@@ -40,7 +40,7 @@ function makeAuthLimiter() {
   });
 }
 
-function makeTxLimiter() {
+async function makeTxLimiter () {
   return rateLimit({
     windowMs: 60_000,
     max: 10,
@@ -53,19 +53,19 @@ function makeTxLimiter() {
 }
 
 let server, baseUrl;
-async function startApp(app) {
+async function startApp (app) {
   server = http.createServer(app);
   await new Promise((r) => server.listen(0, r));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 }
-async function hit(path, { token } = {}) {
+async function hit (path, { token } = {}) {
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${baseUrl}${path}`, { headers });
   return { status: res.status, headers: res.headers };
 }
 
-afterAll(() => server?.close());
+afterAll(async () => server?.close());
 
 describe('Phase 4 · rateLimit — 专项验证 429 + Retry-After（不走 skip）', () => {
   // trust proxy 必须设——否则 Express 4 的 req.ip 在某些环境下为 undefined，
@@ -74,7 +74,7 @@ describe('Phase 4 · rateLimit — 专项验证 429 + Retry-After（不走 skip�
   it('authLimiter: 第 6 次请求 → 429 + Retry-After header', async () => {
     const app = express();
     app.set('trust proxy', 1);
-    app.use(makeAuthLimiter());
+    app.use(await makeAuthLimiter());
     app.get('/test', (_req, res) => res.json({ ok: true }));
     await startApp(app);
 
@@ -103,7 +103,7 @@ describe('Phase 4 · rateLimit — 专项验证 429 + Retry-After（不走 skip�
       req.user = { userId: 42, username: 'alice', role: 'customer' };
       next();
     });
-    app.use(makeTxLimiter());
+    app.use(await makeTxLimiter());
     app.get('/tx', (_req, res) => res.json({ ok: true }));
     await startApp(app);
 
@@ -120,7 +120,7 @@ describe('Phase 4 · rateLimit — 专项验证 429 + Retry-After（不走 skip�
     const app = express();
     app.set('trust proxy', 1);
     // 不注入 req.user ——模拟未带 JWT 打 /api/withdraw/init
-    app.use(makeTxLimiter());
+    app.use(await makeTxLimiter());
     app.get('/tx', (_req, res) => res.json({ ok: true }));
     await startApp(app);
 
@@ -136,7 +136,7 @@ describe('Phase 4 · rateLimit — 专项验证 429 + Retry-After（不走 skip�
   it('standardHeaders: 429 响应带 RateLimit-Policy / Limit / Remaining', async () => {
     const app = express();
     app.set('trust proxy', 1);
-    app.use(makeAuthLimiter());
+    app.use(await makeAuthLimiter());
     app.get('/test', (_req, res) => res.json({ ok: true }));
     await startApp(app);
 

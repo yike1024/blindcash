@@ -30,16 +30,16 @@ export function fundUser(userId, amount) {
  * Clears: users.balance=0, bank_reserve singleton=0, protocol tables.
  * Call this in beforeEach BEFORE fundUser to ensure clean state.
  *
- * @param {import('better-sqlite3').Database} db
+ * @param {object} db — db/tx wrapper from src/models/db.js
  */
-export function resetBalancesAndReserve(db) {
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
+export async function resetBalancesAndReserve(db) {
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
   // Reset all user balances to 0
-  db.exec('UPDATE users SET balance = 0;');
+  await db.exec('UPDATE users SET balance = 0;');
   // Reset bank_reserve singleton to 0 (Phase 1 clean state)
-  db.exec(
+  await db.exec(
     `UPDATE bank_reserve SET total_issued = 0, total_redeemed = 0, reserve_balance = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1;`,
   );
 }

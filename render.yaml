@@ -1,13 +1,12 @@
-# render.yaml — Render Blueprint（一键部署后端）
+# render.yaml — Render Blueprint（一键部署后端 + PostgreSQL）
 #
 # 用法：将本仓库推送到 GitHub，在 Render 控制台 New → Blueprint 选择本仓库，
-# Render 会自动按此文件创建 blindcash-backend 服务。
+# Render 会自动按此文件创建 blindcash-backend 服务和 blindcash-postgres 数据库。
 #
 # 说明：
 #   - 仅部署后端（前端已部署在 Surge: https://blindcash-tabs.surge.sh）
-#   - 使用原生 Node 运行时（非 Docker），Render 自动编译 better-sqlite3 原生模块
-#   - SQLite 数据文件位于 backend/data/，免费层磁盘易失（每次部署重置），
-#     如需持久化请升级到付费实例并挂载 disk，或改用 PostgreSQL
+#   - 使用原生 Node 运行时 + 托管 PostgreSQL（Render 自动注入 DATABASE_URL）
+#   - 后端启动时自动运行 migrations（src/utils/migrationRunner.js）创建表结构
 #   - 部署完成后，用 Render 分配的 https://xxx.onrender.com 作为后端地址，
 #     重新构建前端（VITE_API_BASE_URL=该地址/api）并部署到 Surge
 
@@ -24,11 +23,16 @@ services:
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
-      # Render 原生运行时支持的 Node 版本；better-sqlite3 v11 兼容 18/20/22
       - key: NODE_VERSION
         value: "22"
       - key: NODE_ENV
         value: production
+      # PostgreSQL 连接串由下方 blindcash-postgres 托管实例自动注入（DATABASE_URL）。
+      # db.js 在 NODE_ENV=production 时启用 SSL（rejectUnauthorized: false 兼容托管证书）。
+      - key: DATABASE_URL
+        fromDatabase:
+          name: blindcash-postgres
+          property: connectionString
       # 允许已部署的前端域名调用后端。若前端域名变更，更新此值后重新部署。
       - key: CORS_ORIGIN
         value: https://blindcash-tabs.surge.sh
@@ -40,3 +44,11 @@ services:
         value: da3dd49301988d822775234e8e19796bda76f847bd46c11bce4bf9d9647ede3470ac45755db147ce1d55fa2f96f73ced
       - key: BC_LOG_LEVEL
         value: info
+
+databases:
+  - name: blindcash-postgres
+    databaseName: blindcash
+    user: blindcash
+    plan: free
+    region: singapore
+    ipAllowList: []

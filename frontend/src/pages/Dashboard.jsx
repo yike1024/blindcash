@@ -15,6 +15,7 @@ import {
 } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext.jsx';
 import { countPendingPayments } from '../utils/walletDB.js';
+import api from '../api/client.js';
 
 import BankPage from './Bank.jsx';
 import WalletPage from './Wallet.jsx';
@@ -43,7 +44,7 @@ const PANEL_MAP = {
 };
 
 export default function DashboardPage() {
-  const { user } = useAuth();
+  const { user, updateUser } = useAuth();
   const [active, setActive] = useState('overview');
   const [pendingCount, setPendingCount] = useState(0);
   const tabRefs = useRef({});
@@ -58,6 +59,21 @@ export default function DashboardPage() {
     })();
     return () => { cancelled = true; };
   }, [active]);
+
+  // 切换选项卡时同步最新余额：担保结算/退款/充值等操作在服务端
+  // 修改了 users.balance，但 AuthContext 里缓存的是旧值。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data: me } = await api.get('/auth/me');
+        if (!cancelled && me?.user) {
+          updateUser({ balance: me.user.balance });
+        }
+      } catch { /* 忽略 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [active, updateUser]);
 
   const activeIdx = TABS.findIndex((t) => t.key === active);
 

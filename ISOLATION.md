@@ -11,32 +11,37 @@
 
 ## 一、余额流转不变量（balance flow）
 
-1. **customer.balance 只被 `/withdraw/*` 流程扣减**
-   - `POST /withdraw/init` 时 `balance -= amount`（在 BEGIN IMMEDIATE 内）。
+1. **customer.balance 只被取款与托管退款流程扣减/增加**
+   - `POST /withdraw/init` 时 `balance -= amount`（在 `runImmediateTx` 事务内）。
    - `POST /withdraw/cancel` 与过期懒清理时 `balance += amount`（退款，可加回）。
-   - `POST /payment` **绝不触碰** customer.balance（顾客不直接收款）。
+   - `POST /payment` 与 `POST /escrow/lock` **绝不触碰** customer.balance（顾客不直接收款）。
+   - `POST /escrow/cancel` 与过期托管懒清理时 `balance += amount`（退款，可加回）。
 
-2. **merchant.balance 只被 `/payment` 流程增加**
-   - `POST /payment` 鞂签通过且未双花时 `merchant.balance += amount`。
+2. **merchant.balance 只被支付与托管结算流程增加**
+   - `POST /payment` 验签通过且未双花时 `merchant.balance += amount`。
+   - `POST /escrow/confirm` 时 `merchant.balance += amount`（托管结算）。
    - `/withdraw/*` **绝不触碰** merchant.balance（商户不取款）。
 
-> 上述两条由 `requireRole` 中间件 + 路由分区共同保证：`/withdraw/*` 仅
-> `customer` 可调，`/payment` 仅 `merchant` 可调。
+> 上述流转不依赖角色锁。M7 角色解锁后 `/withdraw/*` 与 `/api/payment` 对任何
+> 已登录用户开放，余额守恒由**密码学验签 + `spent_coins` 唯一约束 + 用户身份隔离**
+> 共同保证：收款/退款目标账户由 token 的 `deposited_to`（托管单 `merchant_id`）与
+> 服务端注入的当前用户身份决定，而非路由级别的 `requireRole`。
 
 **落地证据**：
 
 - 实现位置：
-  - `backend/src/middleware/auth.js` —— `requireRole('customer')` / `requireRole('merchant')` 守卫
-  - `backend/src/routes/withdrawal.js` —— customerGuard 挂载于整个 `/api/withdraw` 路由
-  - `backend/src/routes/payment.js` —— merchantGuard 挂载于 `/api/payment`
+  - `backend/src/routes/withdrawal.js` —— `withdrawGuard = [authenticateJWT]`（M7 角色解锁，仅要求登录）
+  - `backend/src/routes/payment.js` —— `depositGuard = [authenticateJWT]`（M7 角色解锁，仅要求登录）
   - `backend/src/services/withdrawalService.js` —— `initWithdrawal` / `cancelWithdrawal` / `lazyCleanupExpiredSessions` 均通过 `runImmediateTx` 原子操作 `users.balance`
-  - `backend/src/services/paymentService.js` —— `processPayment` 中 `UPDATE users SET balance = balance + ? WHERE id = ?` 只针对 merchant
+  - `backend/src/services/paymentService.js` —— `processPayment` 中 `UPDATE users SET balance = balance + ? WHERE id = ?` 只针对 token 指定的收款商户
+  - `backend/src/services/escrowService.js` —— `confirmEscrow` 结算给 `escrow.merchant_id`；`cancelEscrow` / 过期懒清理退款给 `escrow.customer_id`
 - 测试覆盖：
   - `withdrawal.test.js` —— "M4: 4-move happy path" 验证 init 后 customer.balance 减少
   - `withdrawal.test.js` —— "M4: [必测#3] expired session lazy-cleanup refund" 验证退款恢复 balance
   - `withdrawal.test.js` —— "M4: cancel flow" 验证 cancel 后 balance 加回
   - `payment.test.js` —— "M5: happy path" 验证 merchant.balance 增加 + customer.balance **未被 payment 触碰**
-  - `payment.test.js` —— "M5: role guard + authentication" 验证 customer 调 /payment → 403、merchant 调 /withdraw → 403
+  - `payment.test.js` —— "M5/M7: role guard unlocked + authentication" 验证 customer 调 `/payment` → 200、无 token 调 `/payment` → 401
+  - `escrow.test.js` —— "1. 正常闭环…商户入账且不变量守恒" 与 "6. 协商撤销/退款…法币返还顾客账户且不变量守恒" 验证托管结算/退款流转
   - `integration.test.js` —— "M7 · full end-to-end" E2E 验证 balance 流转完整闭环
 
 ---
@@ -91,7 +96,7 @@
 ## 四、双花检测不变量（double-spend）
 
 6. **`spent_coins.serial` UNIQUE + `token_hash` 边角防护**
-   - Payment 时 `BEGIN IMMEDIATE` 原子执行：`SELECT serial` → 已存在则 409；否则
+   - Payment 时 `runImmediateTx` 原子执行：`SELECT serial` → 已存在则 409；否则
      `INSERT(serial, amount, deposited_to, token_hash)` + `UPDATE merchant.balance`。
    - `token_hash = SHA256(serial ‖ R' ‖ s')` 防同一 token 不同 serial 的边角情况。
 
@@ -156,7 +161,7 @@
   - `backend/src/services/paymentService.js` —— `redeemSplit()` INSERT spent_coins 时 `denomination` 列用 `split_denomination`（教学化标记）
   - 任何测试用例**均未**通过读 `bank_keys.private_key` 伪造签名来"证明"任何事
 - 测试覆盖：
-  - `bankKeyService.test.js`（12 用例）：singleton 行、第二次启动读取同密钥、公钥格式 + 自一致性、`/api/bank/pubkey` 端点无认证可访问
+  - `bankKeyService.test.js`（20 用例）：密钥生成/持久化（首次启动 + 缓存命中 + 二次启动不重生成）、密钥对格式 + 自一致性（P == x·G）、AES-256-GCM 静态加密、按 version 查公钥、rotateKey 轮换（90 天宽限期）、`/api/bank/pubkey` 端点无认证可访问
   - `bankKeyService.test.js` —— "keypair format + self-consistency (P == x·G)" 验证密钥对一致性
   - `bankKeyService.test.js` —— "getOrGenerate(): second boot reads back the SAME keypair" 验证不重新生成
 
@@ -213,17 +218,45 @@
 ## 八、原子写事务不变量（runImmediateTx）
 
 9. **所有涉及余额变动的写操作必须包裹在 `runImmediateTx` 中**
-   - SQLite `BEGIN IMMEDIATE` 在事务开始时立即获取写锁，避免 BEGIN DEFERRED 的 TOCTOU 窗口
+   - PostgreSQL 单连接事务（`BEGIN` → 操作 → `COMMIT`），通过 `pg.Pool.connect()` 独占一个连接执行，避免连接池跨连接导致的事务分裂
    - 任何 throw 自动 `ROLLBACK`，确保 merchant.balance 与 spent_coins、customer.balance 与 session 状态永不分裂
-   - `verifySig` 等只读曲线运算在事务**外**执行，避免写锁持有 ms 级曲线运算时间降低吞吐（教授 H3 铁律）
+   - `verifySig` 等只读曲线运算在事务**外**执行，避免事务持有期间进行 ms 级曲线运算降低吞吐（教授 H3 铁律）
 
 **落地证据**：
 
 - 实现位置：
-  - `backend/src/models/db.js` —— `runImmediateTx(fn)` 函数：`BEGIN IMMEDIATE` → `fn()` → `COMMIT`，throw → `ROLLBACK`
+  - `backend/src/models/db.js` —— `runImmediateTx(fn)` 函数：从连接池取单连接 → `BEGIN` → `fn(txDb)` → `COMMIT`，throw → `ROLLBACK`，finally `client.release()`
   - `backend/src/services/withdrawalService.js` —— `initWithdrawal` / `cancelWithdrawal` / `lazyCleanupExpiredSessions` 三个写路径全部包裹
   - `backend/src/services/paymentService.js` —— `processPayment` 包裹 SELECT serial → INSERT + UPDATE
 - 测试覆盖：
-  - `payment.test.js` —— "M5: [H3] double-spend vs retry semantics" 验证双商户并发同一 token 时 SQLite 写锁互斥：一个 200 一个 409
+  - `payment.test.js` —— "M5: [H3] double-spend vs retry semantics" 验证双商户并发同一 token 时 PostgreSQL `spent_coins.serial` UNIQUE 约束互斥：一个 200 一个 409
   - `integration.test.js` —— "M7 · concurrent double-spend across two merchants" 用 `Promise.all` 触发真实并发，验证原子性
   - `withdrawal.test.js` —— "M4: [必测#2] session uniqueness invariant 4" 验证并发 init 时唯一索引能抓到 race
+
+---
+
+## 九、担保托管状态机不变量（Phase 7 escrow）
+
+10. **`payment_escrows` 两阶段托管状态机 + 确认权限制 + 防抢兑 + 退款守恒**
+   - 状态机：`created → locked → committed`（正常闭环）或 `created → cancelled`
+     （商户撤销）、`locked → cancelled`（退款）、`created/locked → expired`（超时）。
+   - `created` 仅商户可撤销；`locked` 仅锁定该单的顾客本人可 confirm（商户无权自证结算）。
+   - Lock 阶段在事务内先向 `spent_coins` 写入占位（`deposited_to` 绑定 `escrow.merchant_id`），
+     使老接口 `POST /api/payment` 与新接口 `POST /escrow/lock` 均无法对同一 token 抢兑。
+   - confirm 结算给 `escrow.merchant_id` 余额并增加 `total_redeemed`；cancel/expired 退款给
+     `escrow.customer_id` 法币余额并减少 `total_issued`；token 永久作废防信息泄漏。
+   - 全流程在 `runImmediateTx` 单连接事务内执行，事务末尾 `assertInvariant` 断言准备金守恒。
+
+**落地证据**：
+
+- 实现位置：
+  - `backend/src/services/escrowService.js` —— `createEscrow`（服务端注入 `merchant_id`）、`lockToken`（防抢兑占位 `spent_coins`）、`confirmEscrow`（仅 `customer_id` 可确认）、`cancelEscrow`（`created` 仅商户可撤销；`locked` 商户可退 / 顾客超时可退）、`lazyCleanupExpiredEscrows`（超时自动退款）
+  - `backend/src/models/schema.sql` —— `payment_escrows` 表含 `merchant_id` / `customer_id` / `challenge` / `serial` / `token_hash` / `status` / `expires_at`
+  - `backend/src/services/bankReserveService.js` —— `assertInvariant` 中 `(total_issued − total_redeemed)` 天然涵盖 locked 在途托管资金（token 仍在发行总量中、`spent_coins` 已占位），confirm 时 `total_redeemed` 增加、cancel 时 `total_issued` 减少，等式守恒
+- 测试覆盖（`escrow.test.js`，6 用例）：
+  - "1. 正常闭环：商户创建收款单 → 顾客 lock 资金 → 顾客 confirm 收货 → 商户入账且不变量守恒"
+  - "2. 权限防线：商户自身或中间人无权 confirm 结算"
+  - "3. 防中间人抢兑：窃取 token + challenge 无法存入攻击者自己账户"
+  - "4. 原接口防绕过：一旦 token 被锁定，老接口 POST /api/payment 无法抢兑"
+  - "5. 一币多锁拦截：同一个 Token 无法同时锁定到两个不同的收款单"
+  - "6. 协商撤销/退款：商户可主动退款，法币返还顾客账户且不变量守恒"

@@ -15,7 +15,8 @@
 │  │ /register      │  │ /withdraw      │  │ /payment          │  │
 │  │ /login         │  │ 4-step Steps   │  │ 粘贴token→预验签  │  │
 │  │ /dashboard     │  │ α/β useRef     │  │ →POST /payment    │  │
-│  │                │  │ TTL 倒计时     │  │ →双花 409 演示    │  │
+│  │ /bank /wallet  │  │ TTL 倒计时     │  │ →双花 409 演示    │  │
+│  │ /history /privacy│ │                │  │ →escrow 托管     │  │
 │  └────────────────┘  └────────────────┘  └───────────────────┘  │
 │           │                    │                    │            │
 │           └────────────────────┴────────────────────┘            │
@@ -67,12 +68,12 @@
 │  └──────────────────────────────────────────────────────────┘    │
 │  ┌──────────────────────────────────────────────────────────┐    │
 │  │  数据层 (models/db.js + schema.sql)                      │    │
-│  │  SQLite (WAL) + better-sqlite3                            │    │
+│  │  PostgreSQL + pg 连接池 (migrations/*.sql)                │    │
 │  │  ┌──────────┐ ┌──────────────┐ ┌──────────┐ ┌────────┐  │    │
 │  │  │ users    │ │ bank_keys    │ │ withdraw_│ │ spent_ │  │    │
 │  │  │          │ │ (singleton)  │ │ sessions │ │ coins  │  │    │
 │  │  └──────────┘ └──────────────┘ └──────────┘ └────────┘  │    │
-│  │  runImmediateTx (BEGIN IMMEDIATE 写锁)                    │    │
+│  │  runImmediateTx (单连接事务 + UNIQUE 约束串行化)            │    │
 │  └──────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -98,7 +99,7 @@
     │     { amount: 30 }                │                                  │
     │─────────────────────────────────▶│                                  │
     │                                  │  lazyCleanupExpiredSessions     │
-    │                                  │  BEGIN IMMEDIATE:                │
+    │                                  │  事务 (BEGIN):                │
     │                                  │   拒绝若已有 active session     │
     │                                  │   拒绝若 balance < amount        │
     │                                  │   UPDATE users SET balance -= 30│
@@ -124,7 +125,7 @@
     │                                  │  API 防御:                       │
     │                                  │   若 candidate 含 alpha/beta    │
     │                                  │   → 400 BLINDER_LEAKED          │
-    │                                  │  BEGIN IMMEDIATE:                │
+    │                                  │  事务 (BEGIN):                │
     │                                  │   检查 session 状态/过期         │
     │                                  │   合并 e/R'/serial 进 candidates│
     │                                  │   j ← pickRandomJ(N)             │
@@ -143,7 +144,7 @@
     │                                  │  API 防御:                       │
     │                                  │   若 revealed 含 i===j           │
     │                                  │   → 400 SIGNED_CANDIDATE_REVEALED│
-    │                                  │  BEGIN IMMEDIATE:                │
+    │                                  │  事务 (BEGIN):                │
     │                                  │   for each (i, α_i, β_i) in     │
     │                                  │     revealed (i≠j):             │
     │                                  │     verifyRevealed(R_i, R'_i,    │
@@ -185,7 +186,7 @@
     │                                  │   amount, P) (事务外)            │
     │                                  │   失败 → 400 SIGNATURE_INVALID  │
     │                                  │  token_hash = SHA256(serial‖R'‖s')│
-    │                                  │  BEGIN IMMEDIATE:                │
+    │                                  │  事务 (BEGIN):                │
     │                                  │   SELECT serial FROM spent_coins │
     │                                  │   存在 → 409 DOUBLE_SPEND       │
     │                                  │   INSERT spent_coins(serial,    │
@@ -203,7 +204,7 @@
     │                                  │◀─────────────────────────────────│
     │                                  │  formatGate ✓                    │
     │                                  │  verifySig ✓                    │
-    │                                  │  BEGIN IMMEDIATE:                │
+    │                                  │  事务 (BEGIN):                │
     │                                  │   SELECT serial → 已存在        │
     │                                  │   → 409 DOUBLE_SPEND            │
     │                                  │  (transaction 回滚, 不二次扣款) │
@@ -244,8 +245,8 @@ s'·G = (s + α)·G = (k + e·x + α)·G = R + α·G + e·x·G
 │  withdrawal_sessions    │        │  bank_keys               │
 ├─────────────────────────┤        ├─────────────────────────┤
 │  id            PK UUID │        │  id            PK int   │
-│  customer_id  FK→users │        │  public_key   BLOB(33)  │
-│  amount        int     │        │  private_key  BLOB(32)  │
+│  customer_id  FK→users │        │  public_key   BYTEA(33) │
+│  amount        int     │        │  private_key  BYTEA(32) │
 │  n_candidates  int     │        │  created_at   datetime │
 │  candidates    JSON     │        │  CHECK(id=1)            │
 │  (no α_i/β_i!)         │        │  (singleton)            │
@@ -254,10 +255,10 @@ s'·G = (s + α)·G = (k + e·x + α)·G = R + α·G + e·x·G
 │  created_at   datetime│        ┌─────────────────────────┐
 │  expires_at   datetime│        │  spent_coins            │
 └─────────────────────────┘        ├─────────────────────────┤
-   UNIQUE INDEX:                  │  serial       PK BLOB(32)│
+   UNIQUE INDEX:                  │  serial       PK BYTEA(32)│
    idx_ws_active_per_customer     │  amount       int       │
    ON customer_id                 │  deposited_to FK→users  │
-   WHERE status IN                │  token_hash   BLOB(32)  │
+   WHERE status IN                │  token_hash   BYTEA(32) │
      ('pending','submitted')     │  spent_at     datetime  │
                                   └─────────────────────────┘
                                    UNIQUE INDEX:
@@ -394,11 +395,11 @@ e'        = (SHA256(input) mod n) || 1   // 防 0 退化
 
 **为什么 bytes 不 hex**：hex 编码有大小写歧义（0x0A vs 0x0a），若 hash hex 字符串，攻击者可改大小写产生不同 token_hash 绕过 UNIQUE 索引。hash 原始 bytes 完全消除该攻击面。
 
-### 6.4 BEGIN IMMEDIATE 写锁串行化
+### 6.4 事务 + UNIQUE 约束串行化
 
-`runImmediateTx` 在 SQLite WAL 模式下用 `BEGIN IMMEDIATE` 立即获取写锁，事务内：
+`runImmediateTx` 在 PostgreSQL 上单连接执行 `BEGIN` → 写动作 → `COMMIT`，双花防护依赖 `spent_coins.serial` 的 UNIQUE 约束：
 - SELECT serial → 已存在抛 409
-- INSERT spent_coins
+- INSERT spent_coins（并发同 serial 触发 SQLSTATE 23505 → 409）
 - UPDATE merchant.balance
 
 任一步失败整体回滚。这保证双花并发场景下两个并发 payment 只能一个成功。
@@ -421,17 +422,21 @@ M2 `clientBuild.test.js` 在 happy-dom 下端到端跑 `generateBlinders + userC
 
 ---
 
-## 8. 前端路由与角色门
+## 8. 前端路由与访问控制
 
-| 路径 | 组件 | 角色门 |
+| 路径 | 组件 | 访问控制 |
 |---|---|---|
 | `/register` | RegisterPage | 公开 |
 | `/login` | LoginPage | 公开 |
 | `/dashboard` | DashboardPage | 已登录 |
-| `/withdraw` | WithdrawPage | role='customer' |
-| `/payment` | PaymentPage | role='merchant' |
+| `/bank` | BankPage | 已登录（充值 / 退币） |
+| `/wallet` | WalletPage | 已登录（IndexedDB 钱包 + 托管管理） |
+| `/withdraw` | WithdrawPage | 已登录（M7 角色解锁） |
+| `/payment` | PaymentPage | 已登录（M7 角色解锁） |
+| `/history` | HistoryPage | 已登录（账本流水） |
+| `/privacy` | PrivacyPage | 已登录（匿名集分析） |
 
-未登录访问受保护路由 → 重定向 `/login`；角色不符 → antd Result 403。
+M7 起取款 / 收款对任何登录用户开放（不再按 customer/merchant 分区）；未登录访问受保护路由 → 重定向 `/login`。`admin` 专有接口仅在服务端由 `requireRole('admin')` 守卫，无对应前端页面。
 
 ---
 
@@ -482,7 +487,7 @@ Phase 3 在 `bank_keys.private_key` 列上落地了 AES-256-GCM at-rest 加密�
 
 | 威胁 | 是否防御 | 说明 |
 |---|---|---|
-| DB 文件泄露（备份外泄、磁盘被偷） | ✅ 防 | 没有 `BC_MASTER_KEY` 的攻击者拿到 `.db` 文件只能看到密文，无法重建私钥 |
+| 数据库备份/数据文件泄露 | ✅ 防 | 没有 `BC_MASTER_KEY` 的攻击者拿到 PostgreSQL 备份只能看到密文，无法重建私钥 |
 | 服务器进程被攻破（RCE / 内存 dump） | ❌ **不防** | 进程运行时 `MASTER_KEY` 必然在内存明文（`Buffer.from(MASTER_KEY, 'hex')`），且解密后的私钥也在 `bankKeyService._activeCache` 中。攻击者可以直接读内存拿到明文私钥 |
 | 主机管理员 / DBA 恶意 | ⚠️ 部分防 | 防"只拿 DB 文件"的 DBA，不防"既能拿 DB 又能读 env / proc 内存"的 root |
 | 内核级攻击 / 硬件攻击 | ❌ 不防 | 超出本系统威胁模型 |

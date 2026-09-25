@@ -11,19 +11,19 @@
     "dev": "nodemon --env-file-if-exists=.env src/app.js",
     "start": "node --env-file-if-exists=.env src/app.js",
     "init:db": "node src/models/initDb.js",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --no-file-parallelism",
+    "test:watch": "vitest --no-file-parallelism"
   },
   "dependencies": {
     "@noble/hashes": "^1.5.0",
     "@noble/secp256k1": "^2.1.0",
     "bcrypt": "^5.1.1",
-    "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "^8.7.0",
     "express-validator": "^7.2.0",
     "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
     "pino-pretty": "^13.1.3"

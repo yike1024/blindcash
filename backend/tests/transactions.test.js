@@ -10,13 +10,13 @@
 // 复用 payment.test.js 的 mintToken 模式（完整 4-move 取款 + 解盲）。
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb } from '../src/models/db.js';
+import { getDb, closeDb } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
 import { bytesToHex, hexToBytes } from '../src/utils/hex.js';
@@ -27,16 +27,11 @@ import { hashPassword, generateToken } from '../src/services/authService.js';
 import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-m7-transactions.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-process.env.BC_DEMO_N = '10';
-
-initSchema();
-
-const server = http.createServer(app);
+ensureDatabaseUrl();
+process.env.BC_DEMO_N = '10';const server = http.createServer(app);
 let baseUrl;
 
-async function api(path, { method = 'GET', token, body } = {}) {
+async function api (path, { method = 'GET', token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${baseUrl}${path}`, {
@@ -54,21 +49,21 @@ const MERCHANT  = { username: 'bob_tx',   password: 'Passw0rd!extra', role: 'mer
 
 let customerToken, merchantToken, customerId, merchantId;
 
-function scalarToHexFixed(s) {
+function scalarToHexFixed (s) {
   let h = s.toString(16);
   while (h.length < 64) h = '0' + h;
   return h;
 }
-function hexToScalarFixed(hex) {
+function hexToScalarFixed (hex) {
   let v = 0n;
   for (let i = 0; i < hex.length; i++) v = (v << 4n) | BigInt(parseInt(hex[i], 16));
   return v;
 }
 // Phase 1: setBalance removed — direct UPDATE users.balance without updating
-// bank_reserve breaks assertInvariant. Use fundUser(id, amount) for normal
-// funding; resetBalancesAndReserve(db) in beforeEach resets all balances to 0.
+// bank_reserve breaks assertInvariant. Use await fundUser(id, amount) for normal
+// funding; await resetBalancesAndReserve(db) in beforeEach resets all balances to 0.
 
-function clientBuildCandidates(RHexList, amount, publicKeyHex) {
+async function clientBuildCandidates (RHexList, amount, publicKeyHex) {
   const publicKey = hexToBytes(publicKeyHex);
   const candidates = [];
   const blinders = [];
@@ -91,14 +86,14 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
 }
 
 /** 跑完整 4-move 取款，返回 { token, session_id } */
-async function mintToken(token, amount = 10) {
+async function mintToken (token, amount = 10) {
   const denomination = amount;
   const init = await api('/api/withdraw/init', { method: 'POST', token, body: { amount, denomination } });
   expect(init.status).toBe(201);
   const { session_id, R, N } = init.body;
   const pubRes = await api('/api/bank/pubkeys');
   const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
-  const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
+  const { candidates, blinders } = await clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', {
     method: 'POST', token,
@@ -142,26 +137,27 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  db.exec('DELETE FROM users;');
-  db.exec('DELETE FROM bank_keys;');
+  await resetTestDb();
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
+  await db.exec('DELETE FROM users;');
+  await db.exec('DELETE FROM bank_keys;');
   // Phase 1: also reset bank_reserve singleton to 0.
-  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
+  await db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   const cHash = await hashPassword(CUSTOMER.password);
-  const cUser = createUser(CUSTOMER.username, cHash, CUSTOMER.role);
+  const cUser = await createUser(CUSTOMER.username, cHash, CUSTOMER.role);
   customerToken = generateToken(cUser);
   customerId = cUser.id;
 
   const mHash = await hashPassword(MERCHANT.password);
-  const mUser = createUser(MERCHANT.username, mHash, MERCHANT.role);
+  const mUser = await createUser(MERCHANT.username, mHash, MERCHANT.role);
   merchantToken = generateToken(mUser);
   merchantId = mUser.id;
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // Phase 1: resetBalancesAndReserve clears protocol tables + all balances
   // to 0 + bank_reserve singleton. Then fundUser properly deposits 100 BC
   // into the customer. Merchant is NOT funded here — funding the merchant
@@ -170,15 +166,13 @@ beforeEach(() => {
   // that need merchant balance (5.2 merchant 也能取款, 5.3 完整转账闭环)
   // fund the merchant explicitly inside the test body.
   const db = getDb();
-  resetBalancesAndReserve(db);
-  fundUser(customerId, 100);
+  await resetBalancesAndReserve(db);
+  await fundUser(customerId, 100);
 });
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
-  closeDb();
-  rmSync(TEST_DB_PATH, { force: true });
-});
+  await closeTestDb();});
 
 // ════════════════════════════════════════════════════════════════
 // 1. WITHDRAW 写流水
@@ -189,10 +183,10 @@ describe('M7: withdraw 写流水', () => {
     const { session_id } = await mintToken(customerToken, 10);
 
     const db = getDb();
-    // Phase 1: filter to only 'withdraw' rows — fundUser(customerId, 100)
+    // Phase 1: filter to only 'withdraw' rows — await fundUser(customerId, 100)
     // in beforeEach also adds a 'deposit' row (counterparty='bank') that
     // is NOT a withdraw, so unfiltered rows.length would be 2.
-    const rows = db.prepare(
+    const rows = await db.prepare(
       `SELECT kind, amount, counterparty, session_id, note FROM transactions
        WHERE user_id = ? AND kind = 'withdraw'`,
     ).all(customerId);
@@ -209,7 +203,7 @@ describe('M7: withdraw 写流水', () => {
 // 2. DEPOSIT 写流水
 // ════════════════════════════════════════════════════════════════
 
-describe('M7: deposit 写流水', () => {
+describe('M7: deposit 写流水', async () => {
   it('收款成功后 transactions 表有一条 deposit 流水（serial 非空）', async () => {
     const { token } = await mintToken(customerToken, 10);
     const res = await api('/api/payment', {
@@ -222,7 +216,7 @@ describe('M7: deposit 写流水', () => {
     // Phase 1: filter to only 'deposit' rows with counterparty IS NULL —
     // these are /api/payment deposits (Chaum 匿名). The fundUser deposit
     // (if any) has counterparty='bank' and is excluded.
-    const rows = db.prepare(
+    const rows = await db.prepare(
       `SELECT kind, amount, counterparty, serial, note FROM transactions
        WHERE user_id = ? AND kind = 'deposit' AND counterparty IS NULL`,
     ).all(merchantId);
@@ -238,7 +232,7 @@ describe('M7: deposit 写流水', () => {
 // 3. REFUND 写流水
 // ════════════════════════════════════════════════════════════════
 
-describe('M7: refund 写流水', () => {
+describe('M7: refund 写流水', async () => {
   it('取款取消后 transactions 表有一条 refund 流水', async () => {
     const init = await api('/api/withdraw/init', {
       method: 'POST', token: customerToken, body: { amount: 10, denomination: 10 },
@@ -249,9 +243,9 @@ describe('M7: refund 写流水', () => {
     expect(cancel.status).toBe(200);
 
     const db = getDb();
-    // Phase 1: filter to only 'refund' rows — fundUser(customerId, 100) in
+    // Phase 1: filter to only 'refund' rows — await fundUser(customerId, 100) in
     // beforeEach also adds a 'deposit' row that is NOT a refund.
-    const rows = db.prepare(
+    const rows = await db.prepare(
       `SELECT kind, amount, counterparty, session_id, note FROM transactions
        WHERE user_id = ? AND kind = 'refund'`,
     ).all(customerId);
@@ -268,7 +262,7 @@ describe('M7: refund 写流水', () => {
 // 4. GET /api/transactions
 // ════════════════════════════════════════════════════════════════
 
-describe('M7: GET /api/transactions', () => {
+describe('M7: GET /api/transactions', async () => {
   it('返回当前用户的流水（倒序）', async () => {
     // 先取款（withdraw 流水）
     await mintToken(customerToken, 10);
@@ -297,7 +291,7 @@ describe('M7: GET /api/transactions', () => {
 // 5. 角色解锁闭环
 // ════════════════════════════════════════════════════════════════
 
-describe('M7: 角色解锁闭环', () => {
+describe('M7: 角色解锁闭环', async () => {
   it('customer 也能存 token（角色锁已解锁）', async () => {
     // customer 取款 10 → 余额 100→90
     const { token } = await mintToken(customerToken, 10);
@@ -315,17 +309,17 @@ describe('M7: 角色解锁闭环', () => {
     // Phase 1: merchant not funded in beforeEach (would add 'deposit' row
     // interfering with deposit-stream assertions). Fund explicitly here so
     // merchant has balance=100 to withdraw 10 → 90.
-    fundUser(merchantId, 100);
+    await fundUser(merchantId, 100);
     // merchant 取款 10 → 余额 100→90
     const res = await mintToken(merchantToken, 10);
     expect(res.token.amount).toBe(10);
 
     const db = getDb();
-    const m = db.prepare('SELECT balance FROM users WHERE id = ?').get(merchantId);
+    const m = await db.prepare('SELECT balance FROM users WHERE id = ?').get(merchantId);
     expect(m.balance).toBe(90);
 
     // merchant 也有 withdraw 流水
-    const rows = db.prepare(
+    const rows = await db.prepare(
       `SELECT kind FROM transactions WHERE user_id = ?`,
     ).all(merchantId);
     expect(rows.some((r) => r.kind === 'withdraw')).toBe(true);
@@ -335,7 +329,7 @@ describe('M7: 角色解锁闭环', () => {
     // Phase 1: merchant not funded in beforeEach. Fund explicitly here so
     // merchant starts at 100 — needed for step 3 (withdraw 10 after receiving
     // 10 → 110→100) and for the assertions against new_balance below.
-    fundUser(merchantId, 100);
+    await fundUser(merchantId, 100);
     // 1. customer 取款 10（100→90）
     const { token } = await mintToken(customerToken, 10);
     // 2. merchant 收款 10（100→110）

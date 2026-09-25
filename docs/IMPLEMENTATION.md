@@ -9,17 +9,24 @@
 
 | 里程碑 | 范围 | 关键产物 | commit | 测试 |
 |--------|------|----------|--------|------|
-| **M1** | 身份层 | `users` 表、`/api/auth/register`、`/api/auth/login`（bcrypt + JWT + role）、`/api/health`、SQLite WAL + better-sqlite3 | — | 13 |
+| **M1** | 身份层 | `users` 表、`/api/auth/register`、`/api/auth/login`（bcrypt + JWT + role）、`/api/health`、PostgreSQL + `pg` 连接池 | — | 13 |
 | **M2** | 密码学层 | `crypto/server/curve.js`（secp256k1）、`hashToScalar.js`（域分离 tag）、`schnorrBlind.js`（4-move bankStep1/3 + verifySig）、`crypto/client/blinding.js`（generateBlinders / computeBlindedCommitment / unblindResponse）、`cutAndChoose.js`（verifyRevealed + pickRandomJ） | — | 50 |
 | **M3** | 银行密钥层 | `bank_keys` 表（singleton）、`bankKeyService.js`（getOrGenerate + assertKeypairConsistent）、`/api/bank/pubkey`（无认证公开）、`initDb.js`、`app.js` 启动时初始化 | c0ae174 | 12（累计 62） |
 | **M4** | 取款层 | `withdrawal_sessions` 表（状态机 + 部分 UNIQUE 索引）、`withdrawalService.js`（init/submit/reveal/cancel + lazyCleanup）、`/api/withdraw/*` 4 路由（customerGuard）、`WithdrawalError` | 9b76aba | 19（累计 81） |
 | **M5** | 支付层 | `spent_coins` 表、`paymentService.js`（formatGate H1 + computeTokenHash H2 + processPayment H3）、`/api/payment`（merchantGuard）、初始余额（M5 时为 100，Phase 1 改为 0 + 自助充值，见 userService.js） | a01ba90 | 13（累计 94） |
 | **M6** | 前端 E2E | `Withdraw.jsx`（4-step Steps + α/β useRef + TTL 倒计时 + beforeunload 守卫 + mapApiError）、`Payment.jsx`（粘贴 token + 300ms debounce 预验签 + 双花 409 演示）、`AuthContext.jsx`（updateUser）、`AppLayout.jsx`（role 菜单）、`vite.config.js`（@crypto/@config/@utils 别名 + fs.allow） | 20c6699 / 96c258f | clientBuild 4/4 + oxlint 0/0 + vite build 0 errors |
-| **M7** | 集成测试 + 文档 | `integration.test.js`（10 用例：E2E + 跨用户 + 并发双花 + 过期懒清理 + 配置 sanity）、`clientBuild.test.js` 注释澄清、docs 四件套、ISOLATION.md 补证据 | b6fc0c7 | 10（累计 104） |
+| **M7** | 集成测试 + 文档 + 角色解锁 | `integration.test.js`（10 用例：E2E + 跨用户 + 并发双花 + 过期懒清理 + 配置 sanity）、`transactions.js` 账本、`/withdraw/*` 与 `/payment` 取消角色锁、ISOLATION.md 补证据 | b6fc0c7 | 10（累计 104） |
+| **Phase 0-1** | 迁移系统 + 充值/退币 + 准备金 | `migrationRunner.js`、`bankReserveService.js`（assertInvariant）、`bankService.deposit/redeem`、初始余额改为 0 | — | 31（累计 135） |
+| **Phase 2** | 客户端 IndexedDB 钱包 | `walletDB.js`（前端，后端无 wallet 表）、`Wallet.jsx` | — | 前端 8 |
+| **Phase 3** | 审计 + 密钥轮换 + admin | `audit_log` 表、`auditService.js`、`bankKeyService.rotateKey`、`admin.js`（`requireRole('admin')`） | — | 9（累计 144） |
+| **Phase 4** | 限流 + 结构化日志 | `rateLimit.js`（三级限流）、`pino-http` + `logger.js` | — | 5（累计 149） |
+| **Phase 5** | Docker + Swagger | `Dockerfile`、`docker-compose.yml`、`/api/docs`、express.static 托管前端 | — | — |
+| **Phase 6** | 多面额 + 找零 + 隐私 | `DENOMINATIONS`、`/api/bank/pubkeys`、`redeem-split`、`privacy.js` 匿名集分析 | — | 42（累计 191） |
+| **Phase 7** | 担保托管收款 | `payment_escrows` 表、`escrowService.js`（create/lock/confirm/cancel）、`escrow.test.js` | — | 22（累计 213） |
 
 > 详见各 commit 的 git show。所有里程碑落地前均满足：后端测试全绿、`vite build` 0 errors、`oxlint` 0 warnings。
 >
-> **测试归属说明**：M1 身份层没有独立测试文件，注册/登录的协议级覆盖现由 `integration.test.js`（10 用例）与 `payment.test.js`（2 个注册用例）承担；M2 的 50 个用例对应 `schnorrBlind`(19) + `blinding`(9) + `cutAndChoose`(18) + `clientBuild`(4)。累计 104 = 19+9+18+4+12+19+13+10。
+> **测试归属说明**：M1 身份层没有独立测试文件，注册/登录的协议级覆盖现由 `integration.test.js`（10 用例）与 `payment.test.js`（2 个注册用例）承担；M2 的 50 个用例对应 `schnorrBlind`(19) + `blinding`(9) + `cutAndChoose`(18) + `clientBuild`(4)。后端累计 213 = M7 的 104 + Phase 1-7 的 109。前端另有 `walletDB.test.js` 8 例。
 
 ---
 
@@ -91,14 +98,14 @@
 
 **测试覆盖**：`M2.test.js` 中 `cutAndChoose.verifyRevealed` 测试用 N=10；`integration.test.js` 的 E2E 用例也用 N=10；但盲性证据测试（1000-trial entropy ≥ 200 bits）独立运行，不受 BC_DEMO_N 影响。
 
-### 2.5 runImmediateTx 原子写事务（SQLite BEGIN IMMEDIATE）
+### 2.5 runImmediateTx 原子写事务（PostgreSQL 事务）
 
-**决策**：所有涉及余额变动的写操作都包裹在 `backend/src/models/db.js` 的 `runImmediateTx(fn)` 中，该函数执行 `BEGIN IMMEDIATE` → `fn()` → `COMMIT`，任何 throw 则 `ROLLBACK`。
+**决策**：所有涉及余额变动的写操作都包裹在 `backend/src/models/db.js` 的 `runImmediateTx(fn)` 中，该函数执行 `BEGIN` → `fn()` → `COMMIT`，任何 throw 则 `ROLLBACK`。底层使用 PostgreSQL 单连接事务（`pg` PoolClient），事务内所有查询在同一连接上执行，保证原子性。
 
-**为什么不是 BEGIN DEFERRED**：
+**为什么用单连接事务 + UNIQUE 约束**：
 
-- BEGIN DEFERRED 只在第一次写时才获取写锁，存在 TOCTOU 窗口：两个并发事务都读到 "serial 不存在"，都尝试 INSERT，第二个才会 SQLITE_BUSY（默认 busy_timeout 5s 后报错）
-- BEGIN IMMEDIATE 在事务开始时立即获取写锁，第二个并发事务直接阻塞等待第一个 COMMIT，避免"先读后写"的竞态
+- 双花检测依赖 `spent_coins.serial` 的 UNIQUE 约束：两个并发事务都尝试 INSERT 同一 serial，PostgreSQL 只允许一个成功，另一个抛 23505（unique_violation），由 service 层映射为 409 DOUBLE_SPEND
+- 事务内先 `SELECT serial → 409` 再 `INSERT`，配合 UNIQUE 约束形成双层防护；事务失败整体回滚，不会出现"余额加了但 spent_coins 没插"的半状态
 
 **落地位置**：
 
@@ -167,7 +174,7 @@
 | #4 | cut-and-choose N=10 演示降速 | M | 默认 N=100，仅 BC_DEMO_N=10 时降速；docs 显式标注 demo only | `config/bank.js`、`docs/IMPLEMENTATION.md` §2.4 |
 | #5 | clientBuild.test.js spawn DeprecationWarning | L | 保留 shell:true + 18 行注释，非阻塞噪声 | `backend/tests/clientBuild.test.js` |
 | #6 | token_hash 大小写歧义（hex 编码差异） | H | 字节级 Buffer.concat 而非 hex 字符串拼接 | `paymentService.computeTokenHash`、§2.6 |
-| #7 | verifySig 在事务内导致吞吐降低 | H | verifySig 在 BEGIN IMMEDIATE 之外执行，事务只包裹写动作 | `paymentService.processPayment`、§2.5 |
+| #7 | verifySig 在事务内导致吞吐降低 | H | verifySig 在事务之外执行，事务只包裹写动作 | `paymentService.processPayment`、§2.5 |
 
 ---
 
@@ -177,7 +184,7 @@
 |------|------|------|------|
 | Node | LTS | >=24 | `engines.node` 声明，使用 `globalThis.crypto` webcrypto |
 | 后端框架 | Express | ^4.21.2 | |
-| 数据库 | better-sqlite3 | ^11.7.0 | SQLite WAL + BEGIN IMMEDIATE |
+| 数据库 | pg (PostgreSQL) | ^8.13.1 | 连接池 + 事务 + UNIQUE 约束双花防护 |
 | 密码学 | @noble/secp256k1 | ^2.1.0 | 见 §2.2 选型理由 |
 | Hash | @noble/hashes | ^1.5.0 | sha256 域分离 |
 | 密码哈希 | bcrypt | ^5.1.1 | rounds=12 |
@@ -192,10 +199,11 @@
 
 ```bash
 npm run install:all          # 安装前后端依赖
-npm run init:db              # 初始化 SQLite schema
+export DATABASE_URL="postgres://user:pass@host:5432/blindcash"  # PostgreSQL 连接串
+npm run init:db              # 运行 migrations 创建 schema + 生成银行密钥
 npm run dev                  # concurrently 启动 backend(4100) + frontend(5174)
 BC_DEMO_N=10 npm run dev     # 演示模式（cut-and-choose N=10）
-npm test                     # 后端 vitest 全量测试（207 用例）
+npm test                     # 后端 vitest 全量测试
 ```
 
 ---
@@ -206,10 +214,11 @@ npm test                     # 后端 vitest 全量测试（207 用例）
 blindcash/
 ├── backend/
 │   ├── package.json
+│   ├── vitest.config.js
 │   ├── src/
-│   │   ├── app.js                    # Express 入口（M1-M5 路由挂载）
+│   │   ├── app.js                    # Express 入口（M1-M7 + admin/privacy 路由挂载）
 │   │   ├── config/
-│   │   │   └── bank.js               # CUT_AND_CHOOSE_N / SESSION_TTL_MS / TOKEN_DOMAIN_TAG
+│   │   │   └── bank.js               # DENOMINATIONS / CUT_AND_CHOOSE_N / SESSION_TTL_MS / TOKEN_DOMAIN_TAG
 │   │   ├── crypto/
 │   │   │   ├── server/
 │   │   │   │   ├── curve.js          # secp256k1 G/n/modN/encodePoint/decodePoint
@@ -224,24 +233,41 @@ blindcash/
 │   │   ├── models/
 │   │   │   ├── db.js                 # queryOne / runWrite / runImmediateTx
 │   │   │   ├── initDb.js            # 命令行初始化
-│   │   │   └── schema.sql           # users / bank_keys / withdrawal_sessions / spent_coins
+│   │   │   ├── schema.sql           # 9 张表（users / bank_keys / ... / payment_escrows）
+│   │   │   ├── schema_migrations.sql # 迁移记录表
+│   │   │   └── migrations/          # 001-010 迁移脚本
 │   │   ├── routes/
-│   │   │   ├── auth.js              # /api/auth/register /login
-│   │   │   ├── bank.js              # /api/bank/pubkey
+│   │   │   ├── auth.js              # /api/auth/register /login /me
+│   │   │   ├── bank.js              # /api/bank/pubkey /pubkeys /reserve /deposit /redeem /redeem-split
 │   │   │   ├── withdrawal.js        # /api/withdraw/init /submit /reveal /cancel
-│   │   │   └── payment.js           # /api/payment
+│   │   │   ├── payment.js           # /api/payment + escrow/lock/confirm/cancel
+│   │   │   ├── transactions.js      # /api/transactions 账本
+│   │   │   ├── admin.js             # /api/admin/audit /rotate-key（requireRole('admin')）
+│   │   │   └── privacy.js           # 匿名集分析
 │   │   ├── services/
-│   │   │   ├── bankKeyService.js    # getOrGenerate + assertKeypairConsistent
-│   │   │   ├── userService.js       # register + login + INITIAL_BALANCE_CUSTOMER
+│   │   │   ├── authService.js       # 注册 / 登录
+│   │   │   ├── userService.js       # INITIAL_BALANCE_CUSTOMER=0 / 余额读写
+│   │   │   ├── bankKeyService.js    # getOrGenerate + rotateKey + assertKeypairConsistent
+│   │   │   ├── bankService.js       # deposit / redeem / redeem-split
+│   │   │   ├── bankReserveService.js# assertInvariant 准备金不变量
 │   │   │   ├── withdrawalService.js # 4-move 状态机 + WithdrawalError
-│   │   │   └── paymentService.js    # formatGate + computeTokenHash + processPayment
+│   │   │   ├── paymentService.js    # formatGate + computeTokenHash + processPayment
+│   │   │   ├── escrowService.js     # create/lock/confirm/cancel 两阶段托管
+│   │   │   ├── transactionService.js# 账本读写
+│   │   │   ├── auditService.js      # 审计日志
+│   │   │   ├── privacyService.js    # 匿名集统计
+│   │   │   └── sessionCleanupService.js # 过期会话懒清理
 │   │   ├── utils/
 │   │   │   ├── hex.js
-│   │   │   └── pointEncoding.js
+│   │   │   ├── pointEncoding.js
+│   │   │   ├── migrationRunner.js   # 迁移执行器
+│   │   │   └── logger.js            # pino 结构化日志
 │   │   └── middleware/
 │   │       ├── auth.js              # requireAuth（JWT 解析）
-│   │       └── requireRole.js       # requireRole('customer'|'merchant')
+│   │       ├── requireRole.js       # requireRole('customer'|'merchant'|'admin')
+│   │       └── rateLimit.js         # 三级限流
 │   └── tests/
+│       ├── helpers/                 # fundUser / testDb
 │       ├── setup.js                 # bytesToHex / hexToBytes / randomBytes
 │       ├── schnorrBlind.test.js     # 19 用例（M2）
 │       ├── blinding.test.js         # 9 用例（M2）
@@ -250,27 +276,54 @@ blindcash/
 │       ├── withdrawal.test.js       # 19 用例（M4）
 │       ├── payment.test.js          # 13 用例（M5）
 │       ├── integration.test.js      # 10 用例（M7 E2E + 跨用户 + 并发 + 过期）
-│       └── clientBuild.test.js      # 4 用例（vite build 0 errors）
+│       ├── clientBuild.test.js      # 4 用例（vite build 0 errors）
+│       ├── bank.test.js             # 充值 / 退币 / 找零（Phase 1/6）
+│       ├── bankReserveService.test.js
+│       ├── migrationRunner.test.js
+│       ├── multiDenomination.test.js
+│       ├── redeemSplit.test.js
+│       ├── admin.test.js            # admin 审计 / 轮换（Phase 3）
+│       ├── auditService.test.js
+│       ├── rateLimit.test.js        # 限流（Phase 4）
+│       ├── privacy.test.js          # 匿名集（Phase 6）
+│       ├── escrow.test.js           # 6 用例（Phase 7 托管）
+│       └── transactions.test.js
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.js               # @crypto/@config/@utils alias + fs.allow + port 5174
 │   └── src/
-│       ├── App.jsx                  # 路由表（含 role gate）
+│       ├── App.jsx                  # 路由表
+│       ├── main.jsx
+│       ├── api/client.js            # axios 封装 + JWT 注入
 │       ├── context/AuthContext.jsx  # useAuth + updateUser
 │       ├── components/
-│       │   ├── AppLayout.jsx        # role 菜单（customer 取款 / merchant 收款）
-│       │   └── ProtectedRoute.jsx   # 未登录跳 /login，role 不符跳 403
-│       └── pages/
-│           ├── Login.jsx / Register.jsx
-│           ├── Dashboard.jsx        # 显示 balance + role
-│           ├── Withdraw.jsx         # 4-step Steps + α/β useRef + TTL
-│           └── Payment.jsx          # 粘贴 token + 预验签 + 双花 409
+│       │   ├── AppLayout.jsx        # 导航菜单
+│       │   ├── ProtectedRoute.jsx   # 未登录跳 /login
+│       │   └── CollapsibleHint.jsx
+│       ├── utils/
+│       │   └── walletDB.js          # IndexedDB 客户端钱包
+│       ├── pages/
+│       │   ├── Login.jsx / Register.jsx
+│       │   ├── Dashboard.jsx        # balance + role
+│       │   ├── Bank.jsx             # 自助充值 / 退币
+│       │   ├── Wallet.jsx           # IndexedDB 钱包
+│       │   ├── Withdraw.jsx         # 4-step Steps + α/β useRef + TTL
+│       │   ├── Payment.jsx          # 粘贴 token + 预验签 + 双花 409 + 托管
+│       │   ├── History.jsx          # 交易历史
+│       │   └── Privacy.jsx          # 匿名性说明
+│       └── __tests__/
+│           └── walletDB.test.js     # 8 用例（前端）
 ├── docs/
 │   ├── REQUIREMENTS.md              # 用例 + 功能/非功能需求
 │   ├── DESIGN.md                    # 架构 + 时序 + ER + API
 │   ├── IMPLEMENTATION.md           # 本文
-│   └── TESTING.md                  # 用例分类 + 盲性证据 + 双花演示
-├── ISOLATION.md                     # 不变量与隔离约定（M7 补证据）
+│   ├── TESTING.md                  # 用例分类 + 盲性证据 + 双花演示
+│   ├── USERGUIDE.md               # 用户使用指南
+│   └── openapi.yaml               # Swagger 规范
+├── ISOLATION.md                     # 不变量与隔离约定
+├── Dockerfile
+├── docker-compose.yml
+├── render.yaml                      # Render 部署配置
 ├── package.json                     # concurrently 编排
 └── README.md
 ```
@@ -284,5 +337,5 @@ blindcash/
 - RFC 6979 — HMAC-based deterministic nonce generation（概念参考；本系统 k_i 用 CSPRNG 独立随机生成）
 - BIP-340 — Schnorr signatures over secp256k1（域分离 tag 设计参考）
 - @noble/curves 文档 — https://paulmillr.com/noble/（浏览器可跑、常数时间算术）
-- SQLite WAL 模式文档 — https://sqlite.org/wal.html
+- PostgreSQL 事务隔离文档 — https://www.postgresql.org/docs/current/transaction-iso.html
 - v3 实施大纲 §2.2 / §2.3 / §3.1 / §3.3 — 本项目协议、状态机、不变量来源

@@ -9,16 +9,16 @@ import { Router } from 'express';
 import { authenticateJWT } from '../middleware/auth.js';
 import { listTransactions } from '../services/transactionService.js';
 import { bytesToHex } from '../utils/hex.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
 // GET /api/transactions
-router.get('/', authenticateJWT, (req, res) => {
+router.get('/', authenticateJWT, async (req, res) => {
   try {
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50;
-    const rows = listTransactions(req.user.userId, limit);
-    // serial 是 Uint8Array，转成 hex 字符串便于前端展示与复制
+    const rows = await listTransactions(req.user.userId, limit);
     const out = rows.map((r) => ({
       id: r.id,
       kind: r.kind,
@@ -31,7 +31,8 @@ router.get('/', authenticateJWT, (req, res) => {
     }));
     return res.json({ transactions: out });
   } catch (err) {
-    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+    logger.error({ err: err.message, stack: err.stack }, 'transactions route unexpected error');
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
   }
 });
 

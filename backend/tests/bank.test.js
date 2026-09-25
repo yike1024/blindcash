@@ -12,13 +12,13 @@
 // to /api/bank/redeem (which routes through processPayment internally).
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb, queryOne } from '../src/models/db.js';
+import { getDb, closeDb, queryOne } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
 import { bytesToHex, hexToBytes } from '../src/utils/hex.js';
@@ -35,16 +35,11 @@ import {
 import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-p1-bank.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-process.env.BC_DEMO_N = '10';
-
-initSchema();
-
-const server = http.createServer(app);
+ensureDatabaseUrl();
+process.env.BC_DEMO_N = '10';const server = http.createServer(app);
 let baseUrl;
 
-async function api(path, { method = 'GET', token, body } = {}) {
+async function api (path, { method = 'GET', token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${baseUrl}${path}`, {
@@ -62,18 +57,18 @@ let customerToken, customerId;
 
 // ── 4-move withdrawal helpers (mirrors payment.test.js) ──
 
-function scalarToHexFixed(s) {
+function scalarToHexFixed (s) {
   let h = s.toString(16);
   while (h.length < 64) h = '0' + h;
   return h;
 }
-function hexToScalarFixed(hex) {
+function hexToScalarFixed (hex) {
   let v = 0n;
   for (let i = 0; i < hex.length; i++) v = (v << 4n) | BigInt(parseInt(hex[i], 16));
   return v;
 }
 
-function clientBuildCandidates(RHexList, amount, publicKeyHex) {
+async function clientBuildCandidates (RHexList, amount, publicKeyHex) {
   const publicKey = hexToBytes(publicKeyHex);
   const candidates = [];
   const blinders = [];
@@ -96,7 +91,7 @@ function clientBuildCandidates(RHexList, amount, publicKeyHex) {
 }
 
 /** Run full 4-move withdrawal as the customer; return the unblinded token. */
-async function mintToken(amount = 10) {
+async function mintToken (amount = 10) {
   const denomination = amount;
   const init = await api('/api/withdraw/init', { method: 'POST', token: customerToken, body: { amount, denomination } });
   expect(init.status).toBe(201);
@@ -104,7 +99,7 @@ async function mintToken(amount = 10) {
   const pubRes = await api('/api/bank/pubkeys');
   const publicKeyHex = pubRes.body.denominations[String(denomination)].public_key;
   const keyId = init.body.key_id;
-  const { candidates, blinders } = clientBuildCandidates(R, amount, publicKeyHex);
+  const { candidates, blinders } = await clientBuildCandidates(R, amount, publicKeyHex);
 
   const submit = await api('/api/withdraw/submit', {
     method: 'POST', token: customerToken,
@@ -147,29 +142,28 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  db.exec('DELETE FROM users;');
-  db.exec('DELETE FROM bank_keys;');
-  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
+  await resetTestDb();
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
+  await db.exec('DELETE FROM users;');
+  await db.exec('DELETE FROM bank_keys;');
+  await db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   const cHash = await hashPassword(CUSTOMER.password);
-  const cUser = createUser(CUSTOMER.username, cHash, CUSTOMER.role);
+  const cUser = await createUser(CUSTOMER.username, cHash, CUSTOMER.role);
   customerToken = generateToken(cUser);
   customerId = cUser.id;
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   const db = getDb();
-  resetBalancesAndReserve(db);
+  await resetBalancesAndReserve(db);
 });
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
-  closeDb();
-  rmSync(TEST_DB_PATH, { force: true });
-});
+  await closeTestDb();});
 
 // ════════════════════════════════════════════════════════════════
 // 1. GET /api/bank/pubkey (no auth, returns key_id:1)
@@ -197,15 +191,15 @@ describe('Phase 1 · GET /api/bank/pubkey', () => {
 // 2. bankService.deposit service-layer tests
 // ════════════════════════════════════════════════════════════════
 
-describe('Phase 1 · bankService.deposit (service layer)', () => {
-  it('happy path: deposit 100 returns {deposited, new_balance, daily_total}', () => {
-    const result = deposit({ user_id: customerId, amount: 100, ip: '127.0.0.1' });
+describe('Phase 1 · bankService.deposit (service layer)', async () => {
+  it('happy path: deposit 100 returns {deposited, new_balance, daily_total}', async () => {
+    const result = await deposit({ user_id: customerId, amount: 100, ip: '127.0.0.1' });
     expect(result.deposited).toBe(100);
     expect(result.new_balance).toBe(100);
     expect(result.daily_total).toBe(100);
 
     // bank_reserve should have been updated.
-    const r = queryOne(
+    const r = await queryOne(
       'SELECT reserve_balance, total_issued, total_redeemed FROM bank_reserve WHERE id = 1',
     );
     expect(r.reserve_balance).toBe(100);
@@ -213,7 +207,7 @@ describe('Phase 1 · bankService.deposit (service layer)', () => {
     expect(r.total_redeemed).toBe(0);
 
     // A 'deposit' transaction row should have been written.
-    const tx = queryOne(
+    const tx = await queryOne(
       `SELECT kind, amount, counterparty FROM transactions
         WHERE user_id = ? AND kind = 'deposit'`,
       [customerId],
@@ -223,46 +217,41 @@ describe('Phase 1 · bankService.deposit (service layer)', () => {
     expect(tx.counterparty).toBe('bank');
   });
 
-  it('INVALID_AMOUNT: amount=0 throws BankServiceError(400)', () => {
-    expect(() => deposit({ user_id: customerId, amount: 0 }))
-      .toThrow(BankServiceError);
+  it('INVALID_AMOUNT: amount=0 throws BankServiceError(400)', async () => {
+    await expect(deposit({ user_id: customerId, amount: 0 })).rejects.toThrow(BankServiceError);
     let caught = null;
-    try { deposit({ user_id: customerId, amount: 0 }); } catch (e) { caught = e; }
+    try { await deposit({ user_id: customerId, amount: 0 }); } catch (e) { caught = e; }
     expect(caught.status).toBe(400);
     expect(caught.code).toBe('INVALID_AMOUNT');
   });
 
-  it('INVALID_AMOUNT: amount=-50 throws BankServiceError(400)', () => {
-    expect(() => deposit({ user_id: customerId, amount: -50 }))
-      .toThrow(BankServiceError);
+  it('INVALID_AMOUNT: amount=-50 throws BankServiceError(400)', async () => {
+    await expect(deposit({ user_id: customerId, amount: -50 })).rejects.toThrow(BankServiceError);
     let caught = null;
-    try { deposit({ user_id: customerId, amount: -50 }); } catch (e) { caught = e; }
+    try { await deposit({ user_id: customerId, amount: -50 }); } catch (e) { caught = e; }
     expect(caught.status).toBe(400);
     expect(caught.code).toBe('INVALID_AMOUNT');
   });
 
-  it('INVALID_AMOUNT: amount=1.5 (non-integer) throws BankServiceError(400)', () => {
-    expect(() => deposit({ user_id: customerId, amount: 1.5 }))
-      .toThrow(BankServiceError);
+  it('INVALID_AMOUNT: amount=1.5 (non-integer) throws BankServiceError(400)', async () => {
+    await expect(deposit({ user_id: customerId, amount: 1.5 })).rejects.toThrow(BankServiceError);
   });
 
-  it('DEPOSIT_LIMIT_EXCEEDED: amount > MAX_DEPOSIT_PER_TX throws 400', () => {
+  it('DEPOSIT_LIMIT_EXCEEDED: amount > MAX_DEPOSIT_PER_TX throws 400', async () => {
     const tooMuch = MAX_DEPOSIT_PER_TX + 1;
-    expect(() => deposit({ user_id: customerId, amount: tooMuch }))
-      .toThrow(BankServiceError);
+    await expect(deposit({ user_id: customerId, amount: tooMuch })).rejects.toThrow(BankServiceError);
     let caught = null;
-    try { deposit({ user_id: customerId, amount: tooMuch }); } catch (e) { caught = e; }
+    try { await deposit({ user_id: customerId, amount: tooMuch }); } catch (e) { caught = e; }
     expect(caught.status).toBe(400);
     expect(caught.code).toBe('DEPOSIT_LIMIT_EXCEEDED');
   });
 
-  it('USER_NOT_FOUND: deposit to non-existent user throws BankServiceError(404)', () => {
+  it('USER_NOT_FOUND: deposit to non-existent user throws BankServiceError(404)', async () => {
     // Id 999999 doesn't exist; the UPDATE inside runImmediateTx will affect 0 rows,
     // which the service maps to USER_NOT_FOUND.
-    expect(() => deposit({ user_id: 999999, amount: 50 }))
-      .toThrow(BankServiceError);
+    await expect(deposit({ user_id: 999999, amount: 50 })).rejects.toThrow(BankServiceError);
     let caught = null;
-    try { deposit({ user_id: 999999, amount: 50 }); } catch (e) { caught = e; }
+    try { await deposit({ user_id: 999999, amount: 50 }); } catch (e) { caught = e; }
     expect(caught.status).toBe(404);
     expect(caught.code).toBe('USER_NOT_FOUND');
   });
@@ -288,7 +277,7 @@ describe('Phase 1 · POST /api/bank/deposit (route layer)', () => {
     expect(res.body.daily_total).toBe(100);
 
     // Confirm the user's balance is actually 100 in the DB.
-    const u = queryOne('SELECT balance FROM users WHERE id = ?', [customerId]);
+    const u = await queryOne('SELECT balance FROM users WHERE id = ?', [customerId]);
     expect(u.balance).toBe(100);
   });
 
@@ -337,7 +326,7 @@ describe('Phase 1 · POST /api/bank/deposit (route layer)', () => {
 // 4. POST /api/bank/redeem route (HTTP + JWT, token v2 with key_id)
 // ════════════════════════════════════════════════════════════════
 
-describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
+describe('Phase 1 · POST /api/bank/redeem (route layer)', async () => {
   it('without JWT → 401', async () => {
     const res = await api('/api/bank/redeem', {
       method: 'POST', body: { serial: 'x', amount: 30, R_prime: 'y', s_prime: 'z' },
@@ -355,7 +344,7 @@ describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
 
   it('happy path: redeem own token (v2 with key_id) → 200, balance credited', async () => {
     // Fund customer 100, withdraw 10 (→ balance 90), redeem own token (→ balance 100).
-    fundUser(customerId, 100);
+    await fundUser(customerId, 100);
     const { token } = await mintToken(10);
 
     // Sanity: token includes key_id (v2 schema).
@@ -372,7 +361,7 @@ describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
     expect(res.body.new_balance).toBe(100);
 
     // bank_reserve.total_redeemed should have been bumped by 10.
-    const r = queryOne(
+    const r = await queryOne(
       'SELECT total_issued, total_redeemed, reserve_balance FROM bank_reserve WHERE id = 1',
     );
     expect(r.total_issued).toBe(10);
@@ -382,9 +371,9 @@ describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
 
   it('redeem without key_id still works (legacy token fallback to active key)', async () => {
     // Phase 1 single key: key_id is optional in processPayment — falls back
-    // to getActivePublicKey() (denom=1). This proves the route accepts old-style
+    // to await getActivePublicKey() (denom=1). This proves the route accepts old-style
     // tokens. Must use denom=1 so the fallback key matches the signing key.
-    fundUser(customerId, 100);
+    await fundUser(customerId, 100);
     const { token } = await mintToken(1);
     // Strip key_id — emulate a legacy token.
     const { key_id, ...legacyToken } = token;
@@ -399,7 +388,7 @@ describe('Phase 1 · POST /api/bank/redeem (route layer)', () => {
   });
 
   it('double-redeem same token → 409 DOUBLE_SPEND', async () => {
-    fundUser(customerId, 100);
+    await fundUser(customerId, 100);
     const { token } = await mintToken(10);
 
     // First redeem succeeds.

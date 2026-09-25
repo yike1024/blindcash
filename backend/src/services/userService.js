@@ -20,31 +20,17 @@ import { getDb, queryOne } from '../models/db.js';
 
 /**
  * Initial balance credited to new customers on registration.
- *
- * v5 Phase 1 (1.5 开户改革)：改为 0。原 100 BC 教学赠送模式不符合
- * 真实 eCash 货币经济学（用户必须有法币入账才能换电子币）。新用户
- * 注册后 balance=0，前端 Dashboard 显示"充值"CTA 引导用户去 /bank。
- * 测试用 fundUser(id, amount) helper（调 bankService.deposit）充值。
  */
 export const INITIAL_BALANCE_CUSTOMER = 0;
 
 /**
  * Create a new user (INSERT into users).
- * Caller is responsible for hashing the password BEFORE calling this.
- *
- * Initial balance: customer → 0 (Phase 1: 需 /api/bank/deposit 自助充值),
- * merchant → 0 (only /payment credits merchant.balance — ISOLATION §一-2).
- *
- * @param {string} username pseudonym (unique)
- * @param {string} passwordHash bcrypt hash
- * @param {string} role 'customer' | 'merchant'
- * @returns {{id:number, username:string, role:string, balance:number, created_at:string}} created user (without password_hash)
- * @throws if username already exists (UNIQUE constraint)
+ * @returns {Promise<{id:number, username:string, role:string, balance:number, created_at:string}>}
  */
-export function createUser(username, passwordHash, role) {
+export async function createUser(username, passwordHash, role) {
   const db = getDb();
   const initialBalance = role === 'customer' ? INITIAL_BALANCE_CUSTOMER : 0;
-  const result = db.prepare(
+  const result = await db.prepare(
     `INSERT INTO users (username, password_hash, role, balance) VALUES (?, ?, ?, ?)`
   ).run(username, passwordHash, role, initialBalance);
   return getUserById(result.lastInsertRowid);
@@ -52,10 +38,9 @@ export function createUser(username, passwordHash, role) {
 
 /**
  * Get a user by username (used for login).
- * @param {string} username
- * @returns {{id, username, password_hash, role, balance, created_at}|undefined}
+ * @returns {Promise<{...}|undefined>}
  */
-export function getUserByUsername(username) {
+export async function getUserByUsername(username) {
   return queryOne(
     `SELECT id, username, password_hash, role, balance, created_at FROM users WHERE username = ?`,
     [username],
@@ -63,11 +48,10 @@ export function getUserByUsername(username) {
 }
 
 /**
- * Get a user by id (used by auth middleware after JWT verification).
- * @param {number} id
- * @returns {{id, username, password_hash, role, balance, created_at}|undefined}
+ * Get a user by id.
+ * @returns {Promise<{...}|undefined>}
  */
-export function getUserById(id) {
+export async function getUserById(id) {
   return queryOne(
     `SELECT id, username, password_hash, role, balance, created_at FROM users WHERE id = ?`,
     [id],
@@ -76,9 +60,8 @@ export function getUserById(id) {
 
 /**
  * Check if a username is already taken.
- * @param {string} username
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-export function usernameExists(username) {
-  return !!getUserByUsername(username);
+export async function usernameExists(username) {
+  return !!(await getUserByUsername(username));
 }

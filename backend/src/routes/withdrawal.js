@@ -24,6 +24,7 @@ import {
   cancelWithdrawal,
   WithdrawalError,
 } from '../services/withdrawalService.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
@@ -38,25 +39,25 @@ function handleError(res, err) {
   if (err instanceof WithdrawalError) {
     return res.status(err.status).json({ error: err.code, message: err.message });
   }
-  return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  logger.error({ err: err.message, stack: err.stack }, 'withdrawal route unexpected error');
+  return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
 }
 
 // ① POST /api/withdraw/init — Phase 6.1: 加 denomination 参数
-router.post('/init', withdrawGuard, (req, res) => {
+router.post('/init', withdrawGuard, async (req, res) => {
   try {
     const { amount, denomination } = req.body;
     if (amount === undefined) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'amount is required' });
     }
-    const result = initWithdrawal({ customer_id: req.user.userId, amount, denomination });
+    const result = await initWithdrawal({ customer_id: req.user.userId, amount, denomination });
     return res.status(201).json(result);
   } catch (err) {
     return handleError(res, err);
   }
 });
 
-// ③ POST /api/withdraw/submit
-router.post('/submit', withdrawGuard, (req, res) => {
+router.post('/submit', withdrawGuard, async (req, res) => {
   try {
     const { session_id, candidates } = req.body;
     if (!session_id) {
@@ -65,7 +66,7 @@ router.post('/submit', withdrawGuard, (req, res) => {
     if (!Array.isArray(candidates)) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'candidates array is required' });
     }
-    const result = submitCandidates({
+    const result = await submitCandidates({
       session_id,
       customer_id: req.user.userId,
       candidates,
@@ -76,8 +77,7 @@ router.post('/submit', withdrawGuard, (req, res) => {
   }
 });
 
-// ⑤ POST /api/withdraw/reveal
-router.post('/reveal', withdrawGuard, (req, res) => {
+router.post('/reveal', withdrawGuard, async (req, res) => {
   try {
     const { session_id, revealed } = req.body;
     if (!session_id) {
@@ -86,7 +86,7 @@ router.post('/reveal', withdrawGuard, (req, res) => {
     if (!Array.isArray(revealed)) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'revealed array is required' });
     }
-    const result = revealAndSign({
+    const result = await revealAndSign({
       session_id,
       customer_id: req.user.userId,
       revealed,
@@ -97,14 +97,13 @@ router.post('/reveal', withdrawGuard, (req, res) => {
   }
 });
 
-// ⑦ POST /api/withdraw/cancel
-router.post('/cancel', withdrawGuard, (req, res) => {
+router.post('/cancel', withdrawGuard, async (req, res) => {
   try {
     const { session_id } = req.body;
     if (!session_id) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'session_id is required' });
     }
-    const result = cancelWithdrawal({
+    const result = await cancelWithdrawal({
       session_id,
       customer_id: req.user.userId,
     });

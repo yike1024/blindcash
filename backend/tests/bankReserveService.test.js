@@ -7,7 +7,7 @@
 //                           IN ('pending','submitted'))
 //
 // 测试矩阵（5 cases, 见 plan 验收清单）：
-//   ✓ Normal   — fundUser(deposit 100) 后不变量成立
+//   ✓ Normal   — await fundUser(deposit 100) 后不变量成立
 //   ✓ Broken   — 直接 UPDATE users.balance 不更新 reserve → assertInvariant 抛错
 //   ✓ Tx Rollback — runImmediateTx 内抛错 → 整个事务回滚，半状态不留
 //   ✓ In-flight — pending withdrawal_session（amount=30）让 inFlight=30，
@@ -19,18 +19,11 @@
 // 回滚——本测试用 runImmediateTx 验证此语义。
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  initSchema,
-  getDb,
-  closeDb,
-  runImmediateTx,
-  queryOne,
-  runWrite,
-} from '../src/models/db.js';
+import { getDb, closeDb, runImmediateTx, queryOne, runWrite } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import {
   assertInvariant,
   ReserveInvariantError,
@@ -41,39 +34,36 @@ import { createUser } from '../src/services/userService.js';
 import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-p1-bankreserve.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-
-initSchema();
-
+ensureDatabaseUrl();
 let userId;
 
-beforeAll(() => {
+beforeAll(async () => {
   // Clear any leftover data from previous runs (DB file may persist).
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  db.exec('DELETE FROM users;');
-  db.exec('DELETE FROM bank_keys;');
-  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
+  await resetTestDb();
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
+  await db.exec('DELETE FROM users;');
+  await db.exec('DELETE FROM bank_keys;');
+  await db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   // Create one user for all tests. Each beforeEach resets balances + reserve.
-  const user = createUser('alice_reserve', 'hash', 'customer');
+  const user = await createUser('alice_reserve', 'hash', 'customer');
   userId = user.id;
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   const db = getDb();
-  resetBalancesAndReserve(db);
+  await resetBalancesAndReserve(db);
   // ensureSingletonRow is idempotent — defensive if reset cleared the row.
-  ensureSingletonRow(db);
+  await ensureSingletonRow(db);
 });
 
-afterAll(() => {
-  closeDb();
+afterAll(async () => {
+  await closeTestDb();
   for (const suffix of ['', '-wal', '-shm']) {
-    try { rmSync(TEST_DB_PATH + suffix, { force: true }); } catch {}
+
   }
 });
 
@@ -83,21 +73,21 @@ afterAll(() => {
 
 describe('Phase 1 · bankReserveService — assertInvariant', () => {
   describe('Normal: invariant holds after a proper deposit', () => {
-    it('fundUser(deposit 100) leaves the invariant in a consistent state', () => {
+    it('await fundUser(deposit 100) leaves the invariant in a consistent state', async () => {
       // fundUser calls bankService.deposit, which atomically:
       //   users.balance += 100
       //   bank_reserve.reserve_balance += 100
-      //   recordTransaction(kind='deposit')
-      //   assertInvariant(db)  ← must pass
-      fundUser(userId, 100);
+      //   await recordTransaction(kind='deposit')
+      //   await assertInvariant(db)  ← must pass
+      await fundUser(userId, 100);
 
       // Re-assert from outside any transaction — proves the committed state is consistent.
       const db = getDb();
-      expect(() => assertInvariant(db)).not.toThrow();
+      await assertInvariant(db);
 
       // Sanity: reserve_balance should equal 100 (sumBalance=100, issued=0,
       // redeemed=0, inFlight=0).
-      const r = queryOne(
+      const r = await queryOne(
         'SELECT reserve_balance, total_issued, total_redeemed FROM bank_reserve WHERE id = 1',
       );
       expect(r.reserve_balance).toBe(100);
@@ -111,36 +101,36 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
   // ════════════════════════════════════════════════════════════════
 
   describe('Broken: direct balance mutation without reserve update throws', () => {
-    it('UPDATE users.balance += 50 without updating reserve → assertInvariant throws', () => {
+    it('UPDATE users.balance += 50 without updating reserve → assertInvariant throws', async () => {
       const db = getDb();
       // Mutate balance directly — bypasses bankService.deposit so
       // bank_reserve.reserve_balance is NOT updated. This simulates a bug
       // where some code path touches users.balance without going through the
       // service layer.
-      runWrite(`UPDATE users SET balance = balance + ? WHERE id = ?`, [50, userId]);
+      await runWrite(`UPDATE users SET balance = balance + ? WHERE id = ?`, [50, userId]);
 
       // sumBalance=50, reserve_balance=0, issued=0, redeemed=0, inFlight=0
       // expected = 50 + 0 + 0 = 50, but reserve_balance=0 → MISMATCH.
-      expect(() => assertInvariant(db)).toThrow(ReserveInvariantError);
+      await expect(assertInvariant(db)).rejects.toThrow(ReserveInvariantError);
 
       // Verify the error carries the diagnostic details.
       let caught = null;
-      try { assertInvariant(db); } catch (e) { caught = e; }
+      try { await assertInvariant(db); } catch (e) { caught = e; }
       expect(caught).not.toBeNull();
       expect(caught.details.reserve).toBe(0);
       expect(caught.details.expected).toBe(50);
       expect(caught.details.sumBalance).toBe(50);
     });
 
-    it('also breaks when reserve is bumped but balance is not (off-by-direction bug)', () => {
+    it('also breaks when reserve is bumped but balance is not (off-by-direction bug)', async () => {
       const db = getDb();
       // Opposite direction: bump reserve without bumping balance. Simulates
       // a bug where reserve is credited but the user account is missed.
-      runWrite(`UPDATE bank_reserve SET reserve_balance = reserve_balance + 30 WHERE id = 1`);
+      await runWrite(`UPDATE bank_reserve SET reserve_balance = reserve_balance + 30 WHERE id = 1`);
 
       // sumBalance=0, reserve_balance=30, issued=0, redeemed=0, inFlight=0
       // expected = 0 + 0 + 0 = 0, but reserve_balance=30 → MISMATCH.
-      expect(() => assertInvariant(db)).toThrow(ReserveInvariantError);
+      await expect(assertInvariant(db)).rejects.toThrow(ReserveInvariantError);
     });
   });
 
@@ -149,38 +139,38 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
   // ════════════════════════════════════════════════════════════════
 
   describe('Tx Rollback: throw inside runImmediateTx reverts the whole tx', () => {
-    it('a tx that mutates balance + reserve then throws leaves no half-state', () => {
+    it('a tx that mutates balance + reserve then throws leaves no half-state', async () => {
       const db = getDb();
       // Snapshot pre-state.
-      const before = queryOne(
+      const before = await queryOne(
         'SELECT reserve_balance, total_issued, total_redeemed FROM bank_reserve WHERE id = 1',
       );
-      const userBefore = queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
+      const userBefore = await queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
 
       // Run a tx that does the "right" mutations then throws — simulating
       // a code path where assertInvariant (or any later step) fails after
       // the balance + reserve updates have already been issued.
-      expect(() =>
-        runImmediateTx((tx) => {
-          tx.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
+      await expect(
+        runImmediateTx(async (tx) => {
+          await tx.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
             .run(200, userId);
-          tx.prepare(`UPDATE bank_reserve SET reserve_balance = reserve_balance + ? WHERE id = 1`)
+          await tx.prepare(`UPDATE bank_reserve SET reserve_balance = reserve_balance + ? WHERE id = 1`)
             .run(200);
           // Throw BEFORE assertInvariant — emulate a later-step failure.
           throw new Error('synthetic failure after balance + reserve mutation');
         }),
-      ).toThrow();
+      ).rejects.toThrow();
 
       // Post-state MUST equal pre-state — the whole tx rolled back.
-      const after = queryOne(
+      const after = await queryOne(
         'SELECT reserve_balance, total_issued, total_redeemed FROM bank_reserve WHERE id = 1',
       );
-      const userAfter = queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
+      const userAfter = await queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
       expect(after.reserve_balance).toBe(before.reserve_balance);
       expect(userAfter.balance).toBe(userBefore.balance);
     });
 
-    it('assertInvariant failure inside runImmediateTx rolls back the tx (no half-state)', () => {
+    it('assertInvariant failure inside runImmediateTx rolls back the tx (no half-state)', async () => {
       const db = getDb();
       // This is the actual production pattern: deposit updates balance + reserve
       // + recordTransaction + assertInvariant. If assertInvariant throws, the
@@ -189,27 +179,27 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
       // We simulate this by deliberately breaking the invariant mid-tx:
       //   1. UPDATE users.balance += 100 (correct)
       //   2. UPDATE bank_reserve.reserve_balance += 50  (WRONG — should be 100)
-      //   3. assertInvariant(db)  ← throws
+      //   3. await assertInvariant(db)  ← throws
       // The whole tx rolls back → users.balance unchanged, reserve unchanged.
-      const before = queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
-      const rBefore = queryOne(
+      const before = await queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
+      const rBefore = await queryOne(
         'SELECT reserve_balance FROM bank_reserve WHERE id = 1',
       );
 
-      expect(() =>
-        runImmediateTx((tx) => {
-          tx.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
+      await expect(
+        runImmediateTx(async (tx) => {
+          await tx.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?`)
             .run(100, userId);
           // Wrong amount — should be 100 to match the user balance bump.
-          tx.prepare(`UPDATE bank_reserve SET reserve_balance = reserve_balance + ? WHERE id = 1`)
+          await tx.prepare(`UPDATE bank_reserve SET reserve_balance = reserve_balance + ? WHERE id = 1`)
             .run(50);
           // This MUST throw because expected (100) != reserve_balance (50).
-          assertInvariant(tx);
+          await assertInvariant(tx);
         }),
-      ).toThrow(ReserveInvariantError);
+      ).rejects.toThrow(ReserveInvariantError);
 
-      const after = queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
-      const rAfter = queryOne(
+      const after = await queryOne('SELECT balance FROM users WHERE id = ?', [userId]);
+      const rAfter = await queryOne(
         'SELECT reserve_balance FROM bank_reserve WHERE id = 1',
       );
       expect(after.balance).toBe(before.balance);
@@ -222,17 +212,17 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
   // ════════════════════════════════════════════════════════════════
 
   describe('In-flight: pending withdrawal_session contributes to inFlight term', () => {
-    it('a pending session with amount=30 makes inFlight=30, invariant holds', () => {
+    it('a pending session with amount=30 makes inFlight=30, invariant holds', async () => {
       const db = getDb();
       // Fund user 100 (proper deposit — reserve_balance=100, sumBalance=100).
-      fundUser(userId, 100);
+      await fundUser(userId, 100);
 
       // Simulate the post-init state of a withdrawal: the customer called
       // /api/withdraw/init with amount=30. withdrawalService does:
       //   users.balance -= 30          (locked for withdrawal)
       //   bank_reserve.reserve_balance -= 30  (in-flight is not "free money")
       //   INSERT withdrawal_sessions (status='pending', amount=30)
-      //   assertInvariant(db)
+      //   await assertInvariant(db)
       //
       // After init: sumBalance=70, reserve_balance=70, inFlight=30,
       // expected = 70 + (0-0) + 30 = 100... wait, that's wrong. Let me
@@ -256,11 +246,11 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
       //   users.balance -= 30
       //   INSERT withdrawal_sessions(status='pending', amount=30)
       //   (reserve_balance UNCHANGED)
-      //   assertInvariant(db)  ← must pass
-      runImmediateTx((tx) => {
-        tx.prepare(`UPDATE users SET balance = balance - ? WHERE id = ?`)
+      //   await assertInvariant(db)  ← must pass
+      await runImmediateTx(async (tx) => {
+        await tx.prepare(`UPDATE users SET balance = balance - ? WHERE id = ?`)
           .run(30, userId);
-        tx.prepare(
+        await tx.prepare(
           `INSERT INTO withdrawal_sessions
              (id, customer_id, amount, n_candidates, candidates, expires_at, status)
            VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
@@ -275,29 +265,29 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
             .replace('Z', ''),
         );
         // Invariant must hold: 100 == 70 + 0 + 30.
-        assertInvariant(tx);
+        await assertInvariant(tx);
       });
 
       // Confirm the inFlight term is actually 30 (proves the SELECT in
       // assertInvariant picked up the pending session).
-      const inFlight = queryOne(
+      const inFlight = (await queryOne(
         `SELECT COALESCE(SUM(amount), 0) AS s FROM withdrawal_sessions
           WHERE status IN ('pending','submitted')`,
-      ).s;
+      )).s;
       expect(inFlight).toBe(30);
 
       // And re-assert from outside the tx.
-      expect(() => assertInvariant(db)).not.toThrow();
+      await assertInvariant(db);
     });
 
-    it('moving session to "committed" removes the inFlight term but total_issued += amount', () => {
+    it('moving session to "committed" removes the inFlight term but total_issued += amount', async () => {
       const db = getDb();
       // Fund 100, simulate init (balance→70, inFlight=30, reserve=100).
-      fundUser(userId, 100);
-      runImmediateTx((tx) => {
-        tx.prepare(`UPDATE users SET balance = balance - ? WHERE id = ?`)
+      await fundUser(userId, 100);
+      await runImmediateTx(async (tx) => {
+        await tx.prepare(`UPDATE users SET balance = balance - ? WHERE id = ?`)
           .run(30, userId);
-        tx.prepare(
+        await tx.prepare(
           `INSERT INTO withdrawal_sessions
              (id, customer_id, amount, n_candidates, candidates, expires_at, status)
            VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
@@ -311,36 +301,36 @@ describe('Phase 1 · bankReserveService — assertInvariant', () => {
             .replace('T', ' ')
             .replace('Z', ''),
         );
-        assertInvariant(tx);
+        await assertInvariant(tx);
       });
 
       // Now simulate the post-reveal state: session.status='committed'
       // (no longer in inFlight), total_issued += 30 (signed token minted).
       // bank_reserve.reserve_balance UNCHANGED (still 100).
       // New expected: 100 == 70 (balance) + (30 issued - 0 redeemed) + 0 (inFlight) ✓
-      runImmediateTx((tx) => {
-        tx.prepare(
+      await runImmediateTx(async (tx) => {
+        await tx.prepare(
           `UPDATE withdrawal_sessions SET status = 'committed' WHERE id = ?`,
         ).run('test-session-2');
-        tx.prepare(
+        await tx.prepare(
           `UPDATE bank_reserve SET total_issued = total_issued + ? WHERE id = 1`,
         ).run(30);
-        assertInvariant(tx);
+        await assertInvariant(tx);
       });
 
       // Confirm: total_issued=30, inFlight=0, reserve_balance=100, sumBalance=70.
-      const r = queryOne(
+      const r = await queryOne(
         'SELECT reserve_balance, total_issued, total_redeemed FROM bank_reserve WHERE id = 1',
       );
       expect(r.total_issued).toBe(30);
       expect(r.total_redeemed).toBe(0);
       expect(r.reserve_balance).toBe(100);
-      const inFlight = queryOne(
+      const inFlight = (await queryOne(
         `SELECT COALESCE(SUM(amount), 0) AS s FROM withdrawal_sessions
           WHERE status IN ('pending','submitted')`,
-      ).s;
+      )).s;
       expect(inFlight).toBe(0);
-      expect(() => assertInvariant(db)).not.toThrow();
+      await assertInvariant(db);
     });
   });
 });

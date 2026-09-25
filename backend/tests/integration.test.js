@@ -23,13 +23,13 @@
 //   §一-6 spent_coins.serial PRIMARY KEY → double-spend 409
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import app from '../src/app.js';
-import { initSchema, getDb, closeDb } from '../src/models/db.js';
+import { getDb, closeDb } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import { hashToScalar } from '../src/crypto/server/hashToScalar.js';
 import { verifySig } from '../src/crypto/server/schnorrBlind.js';
 import { generateBlinders, computeBlindedCommitment, unblindResponse } from '../src/crypto/client/blinding.js';
@@ -39,17 +39,12 @@ import { TOKEN_DOMAIN_TAG, SESSION_TTL_MS } from '../src/config/bank.js';
 import { fundUser, resetBalancesAndReserve } from './helpers/fundUser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-m7-integration.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-process.env.BC_DEMO_N = '10';
-
-initSchema();
-
-const server = http.createServer(app);
+ensureDatabaseUrl();
+process.env.BC_DEMO_N = '10';const server = http.createServer(app);
 let baseUrl;
 
 /** fetch wrapper returning { status, body }. */
-async function api(path, { method = 'GET', token, body } = {}) {
+async function api (path, { method = 'GET', token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${baseUrl}${path}`, {
@@ -63,24 +58,24 @@ async function api(path, { method = 'GET', token, body } = {}) {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────
-function scalarToHexFixed(s) {
+function scalarToHexFixed (s) {
   let h = s.toString(16);
   while (h.length < 64) h = '0' + h;
   return h;
 }
-function hexToScalarFixed(hex) {
+function hexToScalarFixed (hex) {
   let v = 0n;
   for (let i = 0; i < hex.length; i++) v = (v << 4n) | BigInt(parseInt(hex[i], 16));
   return v;
 }
 
 // Phase 1: setBalance removed — direct UPDATE users.balance without
-// updating bank_reserve breaks assertInvariant. Use fundUser(id, amount)
-// for normal funding; resetBalancesAndReserve(db) resets all balances to 0.
+// updating bank_reserve breaks assertInvariant. Use await fundUser(id, amount)
+// for normal funding; await resetBalancesAndReserve(db) resets all balances to 0.
 
-function expireSession(sessionId) {
+async function expireSession (sessionId) {
   const db = getDb();
-  db.prepare(`UPDATE withdrawal_sessions SET expires_at = ? WHERE id = ?`)
+  await db.prepare(`UPDATE withdrawal_sessions SET expires_at = ? WHERE id = ?`)
     .run('2020-01-01 00:00:00', sessionId);
 }
 
@@ -93,7 +88,7 @@ function expireSession(sessionId) {
  * @param {number} amount
  * @returns {Promise<{ token: {serial,amount,R_prime,s_prime}, session_id, R, N, j }>}
  */
-async function runFull4Move(customerToken, publicKeyHex, amount = 10) {
+async function runFull4Move (customerToken, publicKeyHex, amount = 10) {
   const denomination = amount;
   const init = await api('/api/withdraw/init', {
     method: 'POST', token: customerToken, body: { amount, denomination },
@@ -174,13 +169,14 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   const db = getDb();
-  db.exec('DELETE FROM withdrawal_sessions;');
-  db.exec('DELETE FROM spent_coins;');
-  db.exec('DELETE FROM transactions;');
-  db.exec('DELETE FROM users;');
-  db.exec('DELETE FROM bank_keys;');
+  await resetTestDb();
+  await db.exec('DELETE FROM withdrawal_sessions;');
+  await db.exec('DELETE FROM spent_coins;');
+  await db.exec('DELETE FROM transactions;');
+  await db.exec('DELETE FROM users;');
+  await db.exec('DELETE FROM bank_keys;');
   // Phase 1: also reset bank_reserve singleton to 0.
-  db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
+  await db.exec('UPDATE bank_reserve SET total_issued=0, total_redeemed=0, reserve_balance=0 WHERE id=1;');
 
   // Register users via real HTTP /api/auth/register (exercises full stack:
   // express-validator + bcrypt + JWT + role + initial-balance mechanism).
@@ -195,7 +191,7 @@ beforeAll(async () => {
   customerId = r1.body.user.id;
   expect(r1.body.user.balance).toBe(0); // Phase 1: was 100, now 0
   // Fund the customer via the deposit service so they can withdraw.
-  fundUser(customerId, 100);
+  await fundUser(customerId, 100);
 
   const r2 = await api('/api/auth/register', {
     method: 'POST',
@@ -223,25 +219,23 @@ beforeAll(async () => {
   customer2Token = r4.body.token;
   customer2Id = r4.body.user.id;
   // Phase 1: fund customer2 too so cross-user tests that need balance work.
-  fundUser(customer2Id, 100);
+  await fundUser(customer2Id, 100);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // Phase 1: resetBalancesAndReserve clears protocol tables + all balances
   // to 0 + bank_reserve singleton. Then fundUser properly deposits 100 BC
   // into each customer (updates reserve + assertInvariant). Merchants stay
   // at 0 (only /payment credits merchant.balance).
   const db = getDb();
-  resetBalancesAndReserve(db);
-  fundUser(customerId, 100);
-  fundUser(customer2Id, 100);
+  await resetBalancesAndReserve(db);
+  await fundUser(customerId, 100);
+  await fundUser(customer2Id, 100);
 });
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
-  closeDb();
-  rmSync(TEST_DB_PATH, { force: true });
-});
+  await closeTestDb();});
 
 // ═══════════════════════════════════════════════════════════════════════
 // 1. FULL E2E: customer register → withdraw → merchant deposit → balance
@@ -257,7 +251,7 @@ describe('M7 · full end-to-end flow', () => {
     const { token } = await runFull4Move(customerToken, publicKeyHex, 10);
 
     // customer balance should be 90 (100 - 10 debited at init)
-    const customer = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const customer = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(customer.balance).toBe(90);
 
     // merchant A deposits the token
@@ -269,19 +263,19 @@ describe('M7 · full end-to-end flow', () => {
     expect(dep.body.new_balance).toBe(10);
 
     // customer unchanged by deposit (only merchant balance moves via /payment)
-    const customerAfter = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const customerAfter = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(customerAfter.balance).toBe(90);
-    const merchantA = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantAId);
+    const merchantA = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantAId);
     expect(merchantA.balance).toBe(10);
 
     // spent_coins has 1 row with the serial
-    const spent = getDb().prepare('SELECT serial FROM spent_coins').get();
+    const spent = await getDb().prepare('SELECT serial FROM spent_coins').get();
     expect(spent.serial.length).toBe(32); // Buffer(32)
   });
 
   it('customer register → immediately withdraw (教授风险#1: 充值+取款 race)', async () => {
     // This exercises the initial-balance mechanism: customer registers with
-    // balance=0 (Phase 1), then beforeEach calls fundUser(customerId, 100) via
+    // balance=0 (Phase 1), then beforeEach calls await fundUser(customerId, 100) via
     // /api/bank/deposit. The very next /withdraw call must see balance=100.
     // There is no separate "claim balance" endpoint (professor's risk note was
     // based on a slight misunderstanding — but we still cover the path to
@@ -289,7 +283,7 @@ describe('M7 · full end-to-end flow', () => {
     const pub = await api('/api/bank/pubkeys');
     const { token } = await runFull4Move(customerToken, pub.body.denominations['10'].public_key, 10);
 
-    const customer = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const customer = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(customer.balance).toBe(90); // 100 - 10
 
     // merchant can deposit
@@ -304,7 +298,7 @@ describe('M7 · full end-to-end flow', () => {
 // ═══════════════════════════════════════════════════════════════════════
 // 2. CROSS-USER ACCESS DENIED (ISOLATION §三: A's session_id ≠ B's)
 // ═══════════════════════════════════════════════════════════════════════
-describe('M7 · cross-user access denied', () => {
+describe('M7 · cross-user access denied', async () => {
   it('customer B cannot call submit on customer A\'s session_id → 404 SESSION_NOT_FOUND', async () => {
     const pub = await api('/api/bank/pubkey');
     const publicKeyHex = pub.body.public_key;
@@ -340,7 +334,7 @@ describe('M7 · cross-user access denied', () => {
     expect(submit.body.error).toBe('SESSION_NOT_FOUND');
 
     // alice's session is still pending (carol's failed submit didn't mutate it)
-    const sess = getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(session_id);
+    const sess = await getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(session_id);
     expect(sess.status).toBe('pending');
   });
 
@@ -359,16 +353,16 @@ describe('M7 · cross-user access denied', () => {
     expect(cancel.body.error).toBe('SESSION_NOT_FOUND');
 
     // alice's session still pending + balance still debited
-    const sess = getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(session_id);
+    const sess = await getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(session_id);
     expect(sess.status).toBe('pending');
-    const alice = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const alice = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(alice.balance).toBe(90); // 100 - 10
   });
 
   it('merchant can call /api/withdraw/init → 201 (M7: 角色锁已解锁)', async () => {
     // M7: 角色锁去掉后，merchant 也能取款，形成真·转账闭环
     // Phase 1: fund merchant via deposit so they can withdraw.
-    fundUser(merchantAId, 100);
+    await fundUser(merchantAId, 100);
     const init = await api('/api/withdraw/init', {
       method: 'POST', token: merchantAToken, body: { amount: 10, denomination: 10 },
     });
@@ -394,7 +388,7 @@ describe('M7 · cross-user access denied', () => {
 // ═══════════════════════════════════════════════════════════════════════
 // 3. CROSS-MERCHANT CONCURRENT DOUBLE-SPEND (教授必做: 时序不确定)
 // ═══════════════════════════════════════════════════════════════════════
-describe('M7 · concurrent double-spend across two merchants', () => {
+describe('M7 · concurrent double-spend across two merchants', async () => {
   it('1 token to merchant A + B concurrently → one 200, one 409 (order not guaranteed)', async () => {
     const pub = await api('/api/bank/pubkeys');
     const { token } = await runFull4Move(customerToken, pub.body.denominations['10'].public_key, 10);
@@ -411,13 +405,13 @@ describe('M7 · concurrent double-spend across two merchants', () => {
     expect(statuses).toEqual([200, 409]);
 
     // The 200 winner's balance += 10; the 409 loser's balance stays 0.
-    const merchantA = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantAId);
-    const merchantB = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantBId);
+    const merchantA = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantAId);
+    const merchantB = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(merchantBId);
     const balances = [merchantA.balance, merchantB.balance].sort();
     expect(balances).toEqual([0, 10]);
 
     // Exactly one spent_coins row (the 200 winner's INSERT committed)
-    const spent = getDb().prepare('SELECT COUNT(*) AS n FROM spent_coins').get();
+    const spent = await getDb().prepare('SELECT COUNT(*) AS n FROM spent_coins').get();
     expect(spent.n).toBe(1);
 
     // The 409 loser's response code is DOUBLE_SPEND
@@ -429,7 +423,7 @@ describe('M7 · concurrent double-spend across two merchants', () => {
 // ═══════════════════════════════════════════════════════════════════════
 // 4. EXPIRED SESSION LAZY-CLEANUP (ISOLATION §一-1: refund on next init)
 // ═══════════════════════════════════════════════════════════════════════
-describe('M7 · expired session lazy-cleanup', () => {
+describe('M7 · expired session lazy-cleanup', async () => {
   it('TTL elapse → next init refunds old session + opens new one', async () => {
     // alice opens a session for 10
     const init1 = await api('/api/withdraw/init', {
@@ -438,11 +432,11 @@ describe('M7 · expired session lazy-cleanup', () => {
     expect(init1.status).toBe(201);
     const { session_id: oldSessionId } = init1.body;
     // balance debited to 90
-    const after1 = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const after1 = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(after1.balance).toBe(90);
 
     // ── fast-forward: mark old session as expired ──
-    expireSession(oldSessionId);
+    await expireSession(oldSessionId);
 
     // alice starts a new session for 10 — lazyCleanupExpiredSessions should
     // refund the old 10 (90 → 100) BEFORE debiting the new 10 (100 → 90).
@@ -454,13 +448,13 @@ describe('M7 · expired session lazy-cleanup', () => {
     expect(newSessionId).not.toBe(oldSessionId);
 
     // Final balance: 100 (refunded) - 10 (new debit) = 90
-    const after2 = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const after2 = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(after2.balance).toBe(90);
 
     // Old session is now 'expired', new session is 'pending'
-    const oldSess = getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(oldSessionId);
+    const oldSess = await getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(oldSessionId);
     expect(oldSess.status).toBe('expired');
-    const newSess = getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(newSessionId);
+    const newSess = await getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(newSessionId);
     expect(newSess.status).toBe('pending');
   });
 
@@ -473,7 +467,7 @@ describe('M7 · expired session lazy-cleanup', () => {
     const { session_id, R, N } = init.body;
 
     // expire it
-    expireSession(session_id);
+    await expireSession(session_id);
 
     // build candidates (10) and submit on the expired session
     const publicKey = hexToBytes(pub.body.public_key);
@@ -500,11 +494,11 @@ describe('M7 · expired session lazy-cleanup', () => {
     expect(submit.body.error).toBe('SESSION_EXPIRED');
 
     // balance refunded: 100 (initial was 100 - 10 = 90, refund → 100)
-    const alice = getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
+    const alice = await getDb().prepare('SELECT balance FROM users WHERE id = ?').get(customerId);
     expect(alice.balance).toBe(100);
 
     // session is 'expired'
-    const sess = getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(session_id);
+    const sess = await getDb().prepare('SELECT status FROM withdrawal_sessions WHERE id = ?').get(session_id);
     expect(sess.status).toBe('expired');
   });
 });
@@ -512,8 +506,8 @@ describe('M7 · expired session lazy-cleanup', () => {
 // ═══════════════════════════════════════════════════════════════════════
 // 5. SESSION_TTL_MS sanity (config invariant: 5 minutes default)
 // ═══════════════════════════════════════════════════════════════════════
-describe('M7 · config sanity', () => {
-  it('SESSION_TTL_MS is 5 minutes (300000 ms) by default', () => {
+describe('M7 · config sanity', async () => {
+  it('SESSION_TTL_MS is 5 minutes (300000 ms) by default', async () => {
     // Default TTL — overridden only via BC_SESSION_TTL_MS env. We do NOT set
     // that env in this test file, so the default 5*60*1000 must hold.
     expect(SESSION_TTL_MS).toBe(5 * 60 * 1000);

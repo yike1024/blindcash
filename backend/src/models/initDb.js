@@ -1,39 +1,35 @@
-// models/initDb.js — M1 + M3: create the DB file, run schema.sql, ensure
-// the bank signing keypair exists.
+// models/initDb.js — PostgreSQL bootstrap
 //
 // Run with: npm run init:db
-// Safe to re-run — uses CREATE TABLE IF NOT EXISTS and idempotent keypair
-// provisioning (getOrGenerate() only INSERTs if no row exists).
+// Initializes the DB pool, runs migrations, ensures the bank keypair exists.
 
 import { initSchema, getDb } from './db.js';
 import { getOrGenerate } from '../services/bankKeyService.js';
 import { bytesToHex } from '../utils/hex.js';
 
-initSchema();
-const db = getDb();
-console.log(`[initDb] Database path: ${db.name}`);
+async function main() {
+  await initSchema();
+  const db = getDb();
+  console.log('[initDb] PostgreSQL database initialized.');
 
-// M3: ensure the bank signing keypair exists (singleton row id=1).
-// On first boot this generates x ∈ [1, n-1], P = x·G and persists them.
-// On subsequent boots it reads the existing row back (no regeneration —
-// regenerating would invalidate every previously-issued token).
-const kp = getOrGenerate();
-console.log(`[initDb] Bank public key: ${bytesToHex(kp.publicKey)}`);
+  const kp = await getOrGenerate();
+  console.log(`[initDb] Bank public key: ${bytesToHex(kp.publicKey)}`);
 
-// Sanity: list tables created
-const tables = db.prepare(
-  "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-).all();
-console.log(`[initDb] Tables (${tables.length}): ${tables.map(t => t.name).join(', ')}`);
+  const tables = await db.prepare(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`,
+  ).all();
+  console.log(`[initDb] Tables (${tables.length}): ${tables.map(t => t.tablename).join(', ')}`);
 
-const indexes = db.prepare(
-  "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
-).all();
-console.log(`[initDb] Indexes (${indexes.length}): ${indexes.map(i => i.name).join(', ')}`);
+  const indexes = await db.prepare(
+    `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname`,
+  ).all();
+  console.log(`[initDb] Indexes (${indexes.length}): ${indexes.map(i => i.indexname).join(', ')}`);
 
-const pragmas = db.prepare("PRAGMA journal_mode").get();
-console.log(`[initDb] journal_mode = ${pragmas.journal_mode}`);
-const fk = db.prepare("PRAGMA foreign_keys").get();
-console.log(`[initDb] foreign_keys = ${fk.foreign_keys}`);
+  console.log('[initDb] Schema initialized successfully.');
+  process.exit(0);
+}
 
-console.log('[initDb] Schema initialized successfully.');
+main().catch((err) => {
+  console.error('[initDb] FAILED:', err.message);
+  process.exit(1);
+});

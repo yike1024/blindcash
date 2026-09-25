@@ -26,7 +26,7 @@
 | | 收款页（粘贴 + 预验签 + 提交） | `Payment.jsx` + `/api/payment` | `payment.test.js` |
 | | 预验签（client verifySig） | `schnorrBlindClient.verifySig` | `clientBuild.test.js`（4 用例） |
 | | 双花 409 演示 | `Payment.jsx` "再次提交"按钮 | `payment.test.js` H3 |
-| | 角色守卫（customer 越权 → 403） | `middleware/auth.js` | `payment.test.js` role guard |
+| | M7 角色解锁（任何登录用户可存取款/收款） | `routes/withdrawal.js` + `routes/payment.js` | `transactions.test.js` + `escrow.test.js` |
 
 **自评**：三大功能模块全闭环，无功能缺失（-10 分风险已规避）。
 
@@ -143,7 +143,7 @@
 | 参与者 | 商户 |
 | 前置 | UC-4 已成功存款一次 |
 | 主流程 | 在 Pay 页点"再次提交同一 token" → 409 `DOUBLE_SPEND` → UI 显示双花检测成功 |
-| 教学要点 | 真实双花 = 两商户并发提交同 token，服务器 `BEGIN IMMEDIATE` 串行化；具体哪个 200 哪个 409 由调度决定，**不保证先发起者赢**（教授 M6.md #2） |
+| 教学要点 | 真实双花 = 两商户并发提交同 token，服务器 `runImmediateTx` 串行化；具体哪个 200 哪个 409 由调度决定，**不保证先发起者赢**（教授 M6.md #2） |
 
 ### UC-6：访客公开验签
 
@@ -171,7 +171,7 @@
 | FR-8 | reveal 含 j 索引 → 400 `SIGNED_CANDIDATE_REVEALED` | M4 |
 | FR-9 | 每用户最多 1 个 active session（DB UNIQUE 索引兜底）| M4 |
 | FR-10 | TTL 过期懒清理：next init 触发旧 session 退款 | M4 |
-| FR-11 | 商户收款：`verifySig` 在事务外 → `BEGIN IMMEDIATE` 原子三连 | M5 |
+| FR-11 | 商户收款：`verifySig` 在事务外 → `runImmediateTx` 原子三连 | M5 |
 | FR-12 | 双花检测：serial PRIMARY KEY + token_hash UNIQUE | M5 |
 | FR-13 | 顾客取款向导（4-step + α/β 内存 + TTL 倒计时 + cancel + 复制 token）| M6 step1 |
 | FR-14 | 商户收款页（粘贴 token → 本地预验签 ✓ → 提交 → 双花 409 演示）| M6 step2 |
@@ -187,9 +187,9 @@
 |---|---|---|
 | NFR-1 | **盲性（Unlinkability）**：银行无法将 token 兑付链接回取款者 | α_j/β_j 永不出本机；cut-and-choose N=100 → 1% 作弊概率；1000-trial 熵测试 ≥ 200 bits |
 | NFR-2 | **不可伪造性**：顾客无法伪造 token | s'·G == R' + e'·P 验签 + Schnorr 离散对数安全假设 |
-| NFR-3 | **双花不可重放**：同一 token 第二次提交必失败 | `spent_coins.serial PRIMARY KEY` + `BEGIN IMMEDIATE` 串行化 |
+| NFR-3 | **双花不可重放**：同一 token 第二次提交必失败 | `spent_coins.serial` UNIQUE 约束 + `runImmediateTx` 单连接事务 |
 | NFR-4 | **公私钥隔离**：浏览器只持公钥 P，私钥 x 永不离开服务器 | `crypto/client/` 子集（M2 happy-dom 验证）|
-| NFR-5 | **服务器事务原子性**：余额变动 + 双花写入要么全成要么全败 | `runImmediateTx` + `BEGIN IMMEDIATE` |
+| NFR-5 | **服务器事务原子性**：余额变动 + 双花写入要么全成要么全败 | `runImmediateTx`（单连接 BEGIN/COMMIT 事务）|
 | NFR-6 | **跨标签会话隔离**：customer / merchant 两标签同时登录互不干扰 | `sessionStorage` per-tab 缓存 token+user |
 | NFR-7 | **公开可验证**：任何访客都能用 P 验证 token 真伪 | `GET /api/bank/pubkey` 无 auth |
 | NFR-8 | **测试覆盖**：核心协议 + 双花 + 跨用户 + 盲性证据全覆盖 | 207/207 通过（18 文件，含前端 18 合计 225）|
@@ -201,7 +201,7 @@
 ## 7. 约束与假设
 
 ### 约束
-- 后端：Node.js 24 + Express + better-sqlite3（WAL 模式）
+- 后端：Node.js 24 + Express + PostgreSQL 14+（`pg` 连接池，MVCC 事务）
 - 前端：React 19 + Vite 8 + antd 6
 - 密码学：@noble/secp256k1 + @noble/hashes（secp256k1 曲线）
 - 端口：backend 4100 / frontend 5174（与 cryptobank 项目并行不冲突）
@@ -210,7 +210,7 @@
 ### 假设
 1. 银行签名密钥不泄露（密钥管理是独立维度，ISOLATION §五）
 2. 浏览器进程隔离可信（α/β 内存安全详见 IMPLEMENTATION.md §风险#3）
-3. SQLite 单机事务正确性（不涉及分布式一致性）
+3. PostgreSQL 单机事务正确性（不涉及分布式一致性）
 4. 攻击者不能在顾客设备上注入恶意 JS（XSS 防护是另一维度）
 
 ---
@@ -223,6 +223,7 @@
 | 伪造 token 必被验签拒绝 | M5 `SIGNATURE_INVALID` 测试 |
 | 同 token 重复提交必失败 | M5 + M7 `DOUBLE_SPEND` 测试 |
 | 跨用户 session 隔离 | M7 `SESSION_NOT_FOUND` 测试 |
-| 全量测试 0 失败 | `npm test` → 207/207 |
+| 全量测试 0 失败 | `npm test` → 后端 213/213（前端 8/8 另计） |
 | 前端 build 0 错误 | `cd frontend && npx vite build` exit 0 |
 | 浏览器完整 E2E 跑通 | 教授 M6.md #5 路径：register → withdraw → 复制 → 粘贴 → 预验签 → 提交 → 重试 409 |
+| 担保托管闭环 | `escrow.test.js`：建单 → lock → confirm 入账 + 准备金守恒；越权 confirm → 403；超时退款 |

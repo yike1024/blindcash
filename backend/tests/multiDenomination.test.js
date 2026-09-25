@@ -2,15 +2,14 @@
 //
 // 测试矩阵:
 //   ✓ 不同面额生成独立的密钥对（publicKey 不同）
-//   ✓ getActivePublicKeyByDenom(denom) 返回正确的公钥
-//   ✓ getActiveKeyVersionByDenom(denom) 返回不同的 key_version
-//   ✓ getDenominationByVersion(v) 正确反查 denom
+//   ✓ await getActivePublicKeyByDenom(denom) 返回正确的公钥
+//   ✓ await getActiveKeyVersionByDenom(denom) 返回不同的 key_version
+//   ✓ await getDenominationByVersion(v) 正确反查 denom
 //   ✓ bank_keys 表 partial unique index 保证每个面额只有一个 active
-//   ✓ rotateKey(denom) 按面额轮换，不影响其他面额
+//   ✓ await rotateKey(denom) 按面额轮换，不影响其他面额
 //   ✓ /api/bank/pubkeys 返回所有面额的公钥映射
 
 import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import request from 'supertest';
@@ -26,38 +25,36 @@ import {
   rotateKey,
   _resetCacheForTest,
 } from '../src/services/bankKeyService.js';
-import { initSchema, getDb, closeDb, queryOne } from '../src/models/db.js';
+import { getDb, closeDb, queryOne } from '../src/models/db.js';
+import { resetTestDb, ensureDatabaseUrl, closeTestDb } from './helpers/testDb.js';
 import { bytesToHex } from '../src/utils/hex.js';
 import app from '../src/app.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEST_DB_PATH = join(__dirname, '..', 'data', 'test-p6-multi-denom.db');
-process.env.BC_DB_PATH = TEST_DB_PATH;
-
-initSchema();
-
-beforeEach(() => {
+ensureDatabaseUrl();
+beforeEach(async () => {
   const db = getDb();
-  db.exec('DELETE FROM bank_keys;');
+  await resetTestDb();
+  await db.exec('DELETE FROM bank_keys;');
   _resetCacheForTest();
 });
 
-afterEach(() => {
+afterEach(async () => {
   _resetCacheForTest();
 });
 
-afterAll(() => {
-  closeDb();
+afterAll(async () => {
+  await closeTestDb();
   for (const suffix of ['', '-wal', '-shm']) {
-    try { rmSync(TEST_DB_PATH + suffix, { force: true }); } catch {}
+
   }
 });
 
 describe('Phase 6.1 · multi-denomination keys', () => {
-  it('different denominations get independent keypairs', () => {
-    const kp1 = getOrGenerate(1);
-    const kp5 = getOrGenerate(5);
-    const kp10 = getOrGenerate(10);
+  it('different denominations get independent keypairs', async () => {
+    const kp1 = await getOrGenerate(1);
+    const kp5 = await getOrGenerate(5);
+    const kp10 = await getOrGenerate(10);
 
     // Public keys must be different across denominations
     expect(kp1.publicKey).not.toStrictEqual(kp5.publicKey);
@@ -74,9 +71,9 @@ describe('Phase 6.1 · multi-denomination keys', () => {
     expect(kp10.denomination).toBe(10);
   });
 
-  it('getActivePublicKeyByDenom returns correct key per denom', () => {
-    const pk1 = getActivePublicKeyByDenom(1);
-    const pk5 = getActivePublicKeyByDenom(5);
+  it('getActivePublicKeyByDenom returns correct key per denom', async () => {
+    const pk1 = await getActivePublicKeyByDenom(1);
+    const pk5 = await getActivePublicKeyByDenom(5);
 
     // Should be 33-byte compressed points
     expect(pk1.length).toBe(33);
@@ -89,83 +86,83 @@ describe('Phase 6.1 · multi-denomination keys', () => {
     expect(pk1).not.toStrictEqual(pk5);
   });
 
-  it('getActiveKeyVersionByDenom returns different versions per denom', () => {
-    const kv1 = getActiveKeyVersionByDenom(1);
-    const kv5 = getActiveKeyVersionByDenom(5);
-    const kv10 = getActiveKeyVersionByDenom(10);
+  it('getActiveKeyVersionByDenom returns different versions per denom', async () => {
+    const kv1 = await getActiveKeyVersionByDenom(1);
+    const kv5 = await getActiveKeyVersionByDenom(5);
+    const kv10 = await getActiveKeyVersionByDenom(10);
 
     expect(kv1).not.toBe(kv5);
     expect(kv5).not.toBe(kv10);
     expect(kv1).not.toBe(kv10);
   });
 
-  it('getDenominationByVersion reverse-looks-up denom from key_version', () => {
-    const kp1 = getOrGenerate(1);
-    const kp5 = getOrGenerate(5);
+  it('getDenominationByVersion reverse-looks-up denom from key_version', async () => {
+    const kp1 = await getOrGenerate(1);
+    const kp5 = await getOrGenerate(5);
 
-    expect(getDenominationByVersion(kp1.key_version)).toBe(1);
-    expect(getDenominationByVersion(kp5.key_version)).toBe(5);
+    expect(await getDenominationByVersion(kp1.key_version)).toBe(1);
+    expect(await getDenominationByVersion(kp5.key_version)).toBe(5);
   });
 
-  it('default getOrGenerate() uses denom=1 (backward compat)', () => {
-    const kpDefault = getOrGenerate();     // no arg → denom=1
-    const kp1 = getOrGenerate(1);
+  it('default await getOrGenerate() uses denom=1 (backward compat)', async () => {
+    const kpDefault = await getOrGenerate();     // no arg → denom=1
+    const kp1 = await getOrGenerate(1);
 
     expect(kpDefault.key_version).toBe(kp1.key_version);
     expect(kpDefault.publicKey).toStrictEqual(kp1.publicKey);
     expect(kpDefault.denomination).toBe(1);
   });
 
-  it('getActivePublicKey/getActiveKeyVersion are denom=1 aliases', () => {
-    getOrGenerate(1);
-    getOrGenerate(5); // ensure denom=5 exists too
+  it('getActivePublicKey/getActiveKeyVersion are denom=1 aliases', async () => {
+    await getOrGenerate(1);
+    await getOrGenerate(5); // ensure denom=5 exists too
 
-    const pkAlias = getActivePublicKey();
-    const pk1 = getActivePublicKeyByDenom(1);
+    const pkAlias = await getActivePublicKey();
+    const pk1 = await getActivePublicKeyByDenom(1);
     expect(pkAlias).toStrictEqual(pk1);
 
-    const kvAlias = getActiveKeyVersion();
-    const kv1 = getActiveKeyVersionByDenom(1);
+    const kvAlias = await getActiveKeyVersion();
+    const kv1 = await getActiveKeyVersionByDenom(1);
     expect(kvAlias).toBe(kv1);
   });
 
-  it('bank_keys has exactly one active key per denomination (partial unique index)', () => {
-    getOrGenerate(1);
-    getOrGenerate(5);
+  it('bank_keys has exactly one active key per denomination (partial unique index)', async () => {
+    await getOrGenerate(1);
+    await getOrGenerate(5);
 
-    const activeCount1 = queryOne(
+    const activeCount1 = await queryOne(
       `SELECT COUNT(*) AS c FROM bank_keys WHERE denomination = 1 AND status = 'active'`,
     );
     expect(activeCount1.c).toBe(1);
 
-    const activeCount5 = queryOne(
+    const activeCount5 = await queryOne(
       `SELECT COUNT(*) AS c FROM bank_keys WHERE denomination = 5 AND status = 'active'`,
     );
     expect(activeCount5.c).toBe(1);
   });
 
-  it('rotateKey(denom) rotates only that denom, not others', () => {
-    const kp1Before = getOrGenerate(1);
-    const kp5Before = getOrGenerate(5);
+  it('await rotateKey(denom) rotates only that denom, not others', async () => {
+    const kp1Before = await getOrGenerate(1);
+    const kp5Before = await getOrGenerate(5);
 
     // Rotate denom=1 only
-    const result = rotateKey(1, null);
+    const result = await rotateKey(1, null);
 
     expect(result.denomination).toBe(1);
     expect(result.old_version).toBe(kp1Before.key_version);
     expect(result.new_version).not.toBe(kp1Before.key_version);
 
     // Denom 5 should be unchanged
-    const kv5After = getActiveKeyVersionByDenom(5);
+    const kv5After = await getActiveKeyVersionByDenom(5);
     expect(kv5After).toBe(kp5Before.key_version);
 
     // Denom 1 should have a new key_version
-    const kv1After = getActiveKeyVersionByDenom(1);
+    const kv1After = await getActiveKeyVersionByDenom(1);
     expect(kv1After).not.toBe(kp1Before.key_version);
     expect(kv1After).toBe(result.new_version);
 
     // Old denom=1 key should be retired
-    const oldRow = queryOne(
+    const oldRow = await queryOne(
       `SELECT status FROM bank_keys WHERE key_version = ?`,
       [kp1Before.key_version],
     );
@@ -174,8 +171,8 @@ describe('Phase 6.1 · multi-denomination keys', () => {
 
   it('GET /api/bank/pubkeys returns all denominations', async () => {
     // Generate keys for some denoms
-    getOrGenerate(1);
-    getOrGenerate(5);
+    await getOrGenerate(1);
+    await getOrGenerate(5);
 
     const res = await request(app).get('/api/bank/pubkeys');
 
@@ -202,7 +199,7 @@ describe('Phase 6.1 · multi-denomination keys', () => {
   });
 
   it('GET /api/bank/pubkey still works as denom=1 alias (backward compat)', async () => {
-    getOrGenerate(1);
+    await getOrGenerate(1);
 
     const res = await request(app).get('/api/bank/pubkey');
 
@@ -211,12 +208,12 @@ describe('Phase 6.1 · multi-denomination keys', () => {
     expect(res.body.key_id).toBeTypeOf('number');
   });
 
-  it('getPrivateKeyByDenom returns 32-byte private key per denom', () => {
-    getOrGenerate(1);
-    getOrGenerate(5);
+  it('getPrivateKeyByDenom returns 32-byte private key per denom', async () => {
+    await getOrGenerate(1);
+    await getOrGenerate(5);
 
-    const sk1 = getPrivateKeyByDenom(1);
-    const sk5 = getPrivateKeyByDenom(5);
+    const sk1 = await getPrivateKeyByDenom(1);
+    const sk5 = await getPrivateKeyByDenom(5);
 
     expect(sk1.length).toBe(32);
     expect(sk5.length).toBe(32);

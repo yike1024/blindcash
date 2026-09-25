@@ -15,10 +15,11 @@
 import { Router } from 'express';
 import { authenticateJWT } from '../middleware/auth.js';
 import { computeAnonymityReport } from '../services/privacyService.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
-router.post('/report', authenticateJWT, (req, res) => {
+router.post('/report', authenticateJWT, async (req, res) => {
   try {
     const { tokens } = req.body || {};
     if (!Array.isArray(tokens)) {
@@ -27,10 +28,11 @@ router.post('/report', authenticateJWT, (req, res) => {
         message: 'tokens must be an array of { key_id: number }',
       });
     }
-    const result = computeAnonymityReport(tokens);
+    const result = await computeAnonymityReport(tokens);
     return res.json(result);
   } catch (err) {
-    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+    logger.error({ err: err.message, stack: err.stack }, 'privacy route unexpected error');
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
   }
 });
 
